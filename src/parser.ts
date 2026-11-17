@@ -174,7 +174,31 @@ export const processCSV = (
   const surveyScales: Record<string, number> = {};
   let metadataExtracted = false;
 
-  const dataStartIdx = hasHeader ? 1 : 0;
+  // For legacy files without header, metadata is at fixed lines 26-29, and trials start at line 30
+  if (!hasHeader) {
+    if (rawLines.length > 26) {
+      const row27 = rawLines[26].split(delimiter);
+      if (row27[1]?.trim()) lastName = row27[1].trim().replace(/^["']|["']$/g, '');
+      if (row27[2]?.trim()) firstName = row27[2].trim().replace(/^["']|["']$/g, '');
+    }
+    if (rawLines.length > 27) {
+      const row28 = rawLines[27].split(delimiter);
+      if (row28[1]?.trim()) age = row28[1].trim();
+    }
+    if (rawLines.length > 28) {
+      const row29 = rawLines[28].split(delimiter);
+      const genderRaw = row29[1]?.trim();
+      if (genderRaw === '0') gender = 'женский';
+      else if (genderRaw === '1') gender = 'мужской';
+    }
+    if (rawLines.length > 29) {
+      const row30 = rawLines[29].split(delimiter);
+      if (row30[1]?.trim()) solvedBefore = row30[1].trim();
+    }
+    metadataExtracted = true;
+  }
+
+  const dataStartIdx = hasHeader ? 1 : 30;
 
   for (let i = dataStartIdx; i < rawLines.length; i++) {
     const line = rawLines[i];
@@ -191,6 +215,9 @@ export const processCSV = (
     const x = parseNum(cols[xIdx]);
     const y = parseNum(cols[yIdx]);
     const timestamp = time2Idx !== -1 ? parseNum(cols[time2Idx]) : 0;
+
+    // Skip dummy 0,0 points that can occur before actual mouse movement
+    if (x === 0 && y === 0) continue;
 
     if (!isNaN(x) && !isNaN(y)) {
       if (!trialsMap.has(trialIdNum)) trialsMap.set(trialIdNum, []);
