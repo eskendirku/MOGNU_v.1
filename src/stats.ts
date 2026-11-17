@@ -185,6 +185,9 @@ export const generateStatsCSV = (
 
   const phaseHeaders = phases.flatMap(p => [
     `${p}_TrialsCount`, `${p}_LinesCount`, `${p}_mean_trial_time_ms`, `${p}_total_solution_time_ms`,
+    `${p}_Kin_MeanVelocityPxS`, `${p}_Kin_MaxPeakVelocityPxS`,
+    `${p}_Kin_MeanMovementTimeS`, `${p}_Kin_MeanPauseTimeS`, `${p}_Kin_PauseTimeRatio`,
+    `${p}_Kin_TotalPauseCount`, `${p}_Kin_TrialsWithOutsideBoxCount`, `${p}_Kin_TrialsWithOutsideBoxRatio`,
     `${p}_TotalTurns`, `${p}_NonDotTurns`, `${p}_NonDotTurnsRatio`,
     `${p}_LinesStartOutsideMatrixAbs`, `${p}_LinesStartOutsideMatrixRel`,
     `${p}_LinesFinishOutsideMatrixAbs`, `${p}_LinesFinishOutsideMatrixRel`,
@@ -203,10 +206,41 @@ export const generateStatsCSV = (
     new Set(subjects.flatMap(s => Object.keys(s.surveyScales || {})))
   );
 
+  const kinHeaders = [
+    'Kin_MeanVelocityPxS',
+    'Kin_MeanVelocityMmS',
+    'Kin_MaxPeakVelocityPxS',
+    'Kin_MeanPeakVelocityPxS',
+    'Kin_MeanMovementTimeS',
+    'Kin_TotalMovementTimeS',
+    'Kin_MovementTimeRatio',
+    'Kin_MeanPauseTimeS',
+    'Kin_TotalPauseTimeS',
+    'Kin_PauseTimeRatio',
+    'Kin_TotalPauseCount',
+    'Kin_MeanPauseCountPerTrial',
+    'Kin_MaxPauseS',
+    'Kin_TotalPathPx',
+    'Kin_TotalPathMm',
+    'Kin_MeanPathPerTrialPx',
+    'Kin_MeanPathPerTrialMm',
+    'Kin_TotalSegmentsCount',
+    'Kin_MeanSegmentsCountPerTrial',
+    'Kin_MeanSegmentDurationMs',
+    'Kin_TrialsWithOutsideBoxCount',
+    'Kin_TrialsWithOutsideBoxRatio',
+    'Kin_TotalOutsideBoxTimeS',
+    'Kin_MeanOutsideBoxTimePerTrialS',
+    'Kin_FirstTrialOutsideBox',
+    'Kin_HasAnyOutsideBox',
+    'Kin_SolutionTrialOutsideBox'
+  ];
+
   const headers = [
     'LastName', 'FirstName', 'Age', 'Gender', 'SolvedBefore', 'Insight', 'totalTaskTime',
     ...allScaleNames.map(sc => `Scale_${sc}`),
     'Experience', 'SubjectId', 'Group', 'IsSolved', 'TrialsCount', 'LinesCount', 'mean_trial_time_ms', 'total_solution_time_ms',
+    ...kinHeaders,
     'SolutionStartNode', 'SolutionFinishNode', 'SolutionStartLine',
     'FirstTrialStartNode', 'FirstTrialFinishNode', 'FirstTrialFirstLineType',
     'TotalTurns', 'NonDotTurns', 'NonDotTurnsRatio',
@@ -231,6 +265,15 @@ export const generateStatsCSV = (
     if (!trialsBySubject.has(t.subjectId)) trialsBySubject.set(t.subjectId, []);
     trialsBySubject.get(t.subjectId)!.push(t);
   });
+
+  const escapeCSV = (val: any): string => {
+    if (val === null || val === undefined) return '';
+    const str = String(val);
+    if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+      return `"${str.replace(/"/g, '""')}"`;
+    }
+    return str;
+  };
 
   const subjectRows = subjects.map(s => {
     const hitPadding = s.calibration.hitPadding ?? 15;
@@ -261,6 +304,108 @@ export const generateStatsCSV = (
       const isOverridden = manualOverrides.has(`${firstTrial.subjectId}-${firstTrial.trialId}`);
       firstTrialFirstLineType = firstTrial.lines[0] ? (isOverridden ? 'прочая' : firstTrial.lines[0].type) : 'none';
     }
+
+    // Kinematic Aggregation for Subject
+    let kinTrialsCount = 0;
+    let totalMovementTimeMs = 0;
+    let totalPauseTimeMs = 0;
+    let totalPauseCount = 0;
+    let maxPauseMsInSubject = 0;
+    let totalPathPxInSubject = 0;
+    let totalPathMmInSubject = 0;
+    let totalSegmentsInSubject = 0;
+    let totalSegmentDurationMs = 0;
+    let totalOutsideBoxTimeMs = 0;
+    let trialsWithOutsideBoxCount = 0;
+    let maxPeakVelPxMsInSubject = 0;
+    let sumAvgVelPxMs = 0;
+    let sumPeakVelPxMs = 0;
+
+    subjectTrials.forEach(t => {
+      const k = t.kinematics;
+      if (!k) return;
+      kinTrialsCount++;
+      const m = k.metrics;
+      totalMovementTimeMs += m.movementTimeMs;
+      totalPauseTimeMs += m.pauseTimeMs;
+      totalPauseCount += m.pauseCount;
+      if (m.maxPauseMs > maxPauseMsInSubject) maxPauseMsInSubject = m.maxPauseMs;
+      totalPathPxInSubject += m.totalPathPx;
+      totalPathMmInSubject += m.totalPathMm;
+      totalSegmentsInSubject += (m.segmentsCount || k.segments.length);
+      totalOutsideBoxTimeMs += (m.outsideBoxTimeMs || 0);
+      if (m.isOutsideBox) trialsWithOutsideBoxCount++;
+      if (m.peakVelocityPxMs > maxPeakVelPxMsInSubject) maxPeakVelPxMsInSubject = m.peakVelocityPxMs;
+      sumAvgVelPxMs += m.avgVelocityPxMs;
+      sumPeakVelPxMs += m.peakVelocityPxMs;
+
+      k.segments.forEach(seg => {
+        totalSegmentDurationMs += seg.durationMs;
+      });
+    });
+
+    const totalDurationMsInSubject = totalMovementTimeMs + totalPauseTimeMs;
+    const meanMovementTimeS = kinTrialsCount > 0 ? (totalMovementTimeMs / kinTrialsCount / 1000).toFixed(2) : '0';
+    const totalMovementTimeS = (totalMovementTimeMs / 1000).toFixed(2);
+    const movementTimeRatio = totalDurationMsInSubject > 0 ? ((totalMovementTimeMs / totalDurationMsInSubject) * 100).toFixed(1) : '0';
+
+    const meanPauseTimeS = kinTrialsCount > 0 ? (totalPauseTimeMs / kinTrialsCount / 1000).toFixed(2) : '0';
+    const totalPauseTimeS = (totalPauseTimeMs / 1000).toFixed(2);
+    const pauseTimeRatio = totalDurationMsInSubject > 0 ? ((totalPauseTimeMs / totalDurationMsInSubject) * 100).toFixed(1) : '0';
+    const meanPauseCountPerTrial = kinTrialsCount > 0 ? (totalPauseCount / kinTrialsCount).toFixed(1) : '0';
+    const maxPauseS = (maxPauseMsInSubject / 1000).toFixed(2);
+
+    const meanVelocityPxS = kinTrialsCount > 0 ? ((sumAvgVelPxMs / kinTrialsCount) * 1000).toFixed(1) : '0';
+    const meanVelocityMmS = kinTrialsCount > 0 ? (((sumAvgVelPxMs / kinTrialsCount) * 1000) * 0.264583).toFixed(1) : '0';
+    const maxPeakVelocityPxS = (maxPeakVelPxMsInSubject * 1000).toFixed(1);
+    const meanPeakVelocityPxS = kinTrialsCount > 0 ? ((sumPeakVelPxMs / kinTrialsCount) * 1000).toFixed(1) : '0';
+
+    const totalPathPx = totalPathPxInSubject.toFixed(1);
+    const totalPathMm = totalPathMmInSubject.toFixed(1);
+    const meanPathPerTrialPx = kinTrialsCount > 0 ? (totalPathPxInSubject / kinTrialsCount).toFixed(1) : '0';
+    const meanPathPerTrialMm = kinTrialsCount > 0 ? (totalPathMmInSubject / kinTrialsCount).toFixed(1) : '0';
+
+    const meanSegmentsCountPerTrial = kinTrialsCount > 0 ? (totalSegmentsInSubject / kinTrialsCount).toFixed(1) : '0';
+    const meanSegmentDurationMs = totalSegmentsInSubject > 0 ? (totalSegmentDurationMs / totalSegmentsInSubject).toFixed(0) : '0';
+
+    const trialsWithOutsideBoxRatio = kinTrialsCount > 0 ? ((trialsWithOutsideBoxCount / kinTrialsCount) * 100).toFixed(1) : '0';
+    const totalOutsideBoxTimeS = (totalOutsideBoxTimeMs / 1000).toFixed(2);
+    const meanOutsideBoxTimePerTrialS = kinTrialsCount > 0 ? (totalOutsideBoxTimeMs / kinTrialsCount / 1000).toFixed(2) : '0';
+
+    const lastTrial = subjectTrials.length > 0 ? subjectTrials[subjectTrials.length - 1] : null;
+    const firstTrialOutsideBox = firstTrial?.kinematics?.metrics.isOutsideBox ? '1' : '0';
+    const hasAnyOutsideBox = trialsWithOutsideBoxCount > 0 ? '1' : '0';
+    const solutionTrialOutsideBox = (lastTrial && s.isSolved && lastTrial.kinematics?.metrics.isOutsideBox) ? '1' : '0';
+
+    const subjectKinematicsValues = [
+      meanVelocityPxS,
+      meanVelocityMmS,
+      maxPeakVelocityPxS,
+      meanPeakVelocityPxS,
+      meanMovementTimeS,
+      totalMovementTimeS,
+      movementTimeRatio,
+      meanPauseTimeS,
+      totalPauseTimeS,
+      pauseTimeRatio,
+      totalPauseCount,
+      meanPauseCountPerTrial,
+      maxPauseS,
+      totalPathPx,
+      totalPathMm,
+      meanPathPerTrialPx,
+      meanPathPerTrialMm,
+      totalSegmentsInSubject,
+      meanSegmentsCountPerTrial,
+      meanSegmentDurationMs,
+      trialsWithOutsideBoxCount,
+      trialsWithOutsideBoxRatio,
+      totalOutsideBoxTimeS,
+      meanOutsideBoxTimePerTrialS,
+      firstTrialOutsideBox,
+      hasAnyOutsideBox,
+      solutionTrialOutsideBox
+    ];
 
     // Turn Stats
     let totalTurns = 0;
@@ -344,7 +489,6 @@ export const generateStatsCSV = (
     const avgOutsideLinesLengthInSubject = subjectTotalOutsideLinesCount > 0 ? (subjectTotalOutsideLinesLength / subjectTotalOutsideLinesCount).toFixed(2) : '0';
 
     // Solution Trial Info
-    const lastTrial = subjectTrials.length > 0 ? subjectTrials[subjectTrials.length - 1] : null;
     let solutionStartNode = 'none';
     let solutionFinishNode = 'none';
     let solutionStartLine = '';
@@ -401,6 +545,35 @@ export const generateStatsCSV = (
     const phaseStats = subjectPhases.flatMap(phaseTrials => {
       const pTotal_solution_time_ms = phaseTrials.reduce((sum, t) => sum + (t.trial_time_ms || 0), 0);
       const pMean_trial_time_ms = phaseTrials.length > 0 ? pTotal_solution_time_ms / phaseTrials.length : 0;
+
+      // Kinematic Phase Stats
+      let pKinTrialsCount = 0;
+      let pTotalMovementTimeMs = 0;
+      let pTotalPauseTimeMs = 0;
+      let pTotalPauseCount = 0;
+      let pSumAvgVel = 0;
+      let pMaxPeakVel = 0;
+      let pOutsideBoxTrials = 0;
+
+      phaseTrials.forEach(t => {
+        const k = t.kinematics;
+        if (!k) return;
+        pKinTrialsCount++;
+        pTotalMovementTimeMs += k.metrics.movementTimeMs;
+        pTotalPauseTimeMs += k.metrics.pauseTimeMs;
+        pTotalPauseCount += k.metrics.pauseCount;
+        pSumAvgVel += k.metrics.avgVelocityPxMs;
+        if (k.metrics.peakVelocityPxMs > pMaxPeakVel) pMaxPeakVel = k.metrics.peakVelocityPxMs;
+        if (k.metrics.isOutsideBox) pOutsideBoxTrials++;
+      });
+
+      const pMeanMovementTimeS = pKinTrialsCount > 0 ? (pTotalMovementTimeMs / pKinTrialsCount / 1000).toFixed(2) : '0';
+      const pMeanPauseTimeS = pKinTrialsCount > 0 ? (pTotalPauseTimeMs / pKinTrialsCount / 1000).toFixed(2) : '0';
+      const pTotalDur = pTotalMovementTimeMs + pTotalPauseTimeMs;
+      const pPauseTimeRatio = pTotalDur > 0 ? ((pTotalPauseTimeMs / pTotalDur) * 100).toFixed(1) : '0';
+      const pMeanVelPxS = pKinTrialsCount > 0 ? ((pSumAvgVel / pKinTrialsCount) * 1000).toFixed(1) : '0';
+      const pMaxPeakVelPxS = (pMaxPeakVel * 1000).toFixed(1);
+      const pOutsideBoxRatio = pKinTrialsCount > 0 ? ((pOutsideBoxTrials / pKinTrialsCount) * 100).toFixed(1) : '0';
 
       let pTotalTurns = 0;
       let pNonDotTurns = 0;
@@ -485,6 +658,14 @@ export const generateStatsCSV = (
         pTotalLinesCount,
         pMean_trial_time_ms.toFixed(2),
         pTotal_solution_time_ms.toFixed(0),
+        pMeanVelPxS,
+        pMaxPeakVelPxS,
+        pMeanMovementTimeS,
+        pMeanPauseTimeS,
+        pPauseTimeRatio,
+        pTotalPauseCount,
+        pOutsideBoxTrials,
+        pOutsideBoxRatio,
         pTotalTurns,
         pNonDotTurns,
         pNonDotTurnsRatio,
@@ -510,7 +691,7 @@ export const generateStatsCSV = (
       ];
     });
 
-    return [
+    const values = [
       s.lastName,
       s.firstName,
       s.age,
@@ -527,6 +708,7 @@ export const generateStatsCSV = (
       subjectLines.length,
       subject_mean_trial_time_ms.toFixed(2),
       subject_total_solution_time_ms.toFixed(0),
+      ...subjectKinematicsValues,
       solutionStartNode,
       solutionFinishNode,
       solutionStartLine,
@@ -558,7 +740,133 @@ export const generateStatsCSV = (
       ...positionCounts,
       ...phaseStats
     ];
+
+    return values.map(escapeCSV);
   });
 
   return [headers.join(','), ...subjectRows.map(r => r.join(','))].join('\n');
+};
+
+export const generateKinematicsCSV = (
+  trials: ProcessedTrial[],
+  subjects: SubjectData[],
+  subjectGroups?: Record<string, string>
+): string => {
+  const headers = [
+    'LastName', 'FirstName', 'Age', 'Gender', 'Group', 'SubjectId', 'IsSolved', 'TrialId',
+    'DurationS', 'DurationMs', 'MovementTimeS', 'MovementTimeMs',
+    'PauseTimeS', 'PauseTimeMs', 'PauseCount', 'MaxPauseS', 'MaxPauseMs',
+    'PeakVelocityPxMs', 'PeakVelocityMmS', 'AvgVelocityPxMs',
+    'TotalPathPx', 'TotalPathMm', 'IsOutsideBox', 'SegmentsCount',
+    'CalibrationOffsetX', 'CalibrationOffsetY', 'CalibrationScale'
+  ];
+
+  const subjectsMap = new Map<string, SubjectData>();
+  subjects.forEach(s => subjectsMap.set(s.id, s));
+
+  const rows = trials.map(t => {
+    const s = subjectsMap.get(t.subjectId);
+    const k = t.kinematics?.metrics;
+    const cal = s?.calibration || { offsetX: 0, offsetY: 0, scale: 1, hitPadding: 15 };
+    const group = (subjectGroups && subjectGroups[t.subjectId]) || s?.group || '';
+
+    return [
+      `"${s?.lastName || ''}"`,
+      `"${s?.firstName || ''}"`,
+      s?.age || '',
+      `"${s?.gender || ''}"`,
+      `"${group}"`,
+      `"${t.subjectId}"`,
+      s?.isSolved ? '1' : '0',
+      t.trialId,
+      k?.durationS ?? ((t.trial_time_ms || 0) / 1000).toFixed(2),
+      k?.durationMs ?? (t.trial_time_ms || 0),
+      k?.movementTimeS ?? '',
+      k?.movementTimeMs ?? '',
+      k?.pauseTimeS ?? '',
+      k?.pauseTimeMs ?? '',
+      k?.pauseCount ?? '',
+      k?.maxPauseS ?? '',
+      k?.maxPauseMs ?? '',
+      k?.peakVelocityPxMs ?? '',
+      k?.peakVelocityMmS ?? '',
+      k?.avgVelocityPxMs ?? '',
+      k?.totalPathPx ?? '',
+      k?.totalPathMm ?? '',
+      k?.isOutsideBox ? '1' : '0',
+      k?.segmentsCount ?? t.lines.length,
+      cal.offsetX,
+      cal.offsetY,
+      cal.scale
+    ].join(';');
+  });
+
+  return [headers.join(';'), ...rows].join('\n');
+};
+
+export const generateDuplexFullCSV = (
+  filteredTrials: ProcessedTrial[],
+  subjects: SubjectData[],
+  manualOverrides: Set<string>,
+  subjectGroups?: Record<string, string>
+): string => {
+  const headers = [
+    'LastName', 'FirstName', 'Age', 'Gender', 'Group', 'SubjectId', 'IsSolved', 'TrialId',
+    'LineIdx', 'OriginalType', 'ActualType', 'IsManualOverride', 'Nodes',
+    'TrialDurationS', 'MovementTimeS', 'PauseTimeS', 'PauseCount', 'MaxPauseS',
+    'PeakVelocityMmS', 'AvgVelocityPxMs', 'LineDurationS', 'LineLengthMm', 'LineAngleDeg',
+    'IsOutsideBox', 'TrialFinishNode',
+    'CalibrationOffsetX', 'CalibrationOffsetY', 'CalibrationScale'
+  ];
+
+  const subjectsMap = new Map<string, SubjectData>();
+  subjects.forEach(s => subjectsMap.set(s.id, s));
+
+  const rows = filteredTrials.flatMap(t => {
+    const s = subjectsMap.get(t.subjectId);
+    const k = t.kinematics;
+    const km = k?.metrics;
+    const cal = s?.calibration || { offsetX: 0, offsetY: 0, scale: 1, hitPadding: 15 };
+    const group = (subjectGroups && subjectGroups[t.subjectId]) || s?.group || '';
+    const overrideKey = `${t.subjectId}-${t.trialId}`;
+    const isOverridden = manualOverrides.has(overrideKey);
+    const lastLineOfTrial = t.lines[t.lines.length - 1];
+    const trialFinishNode = lastLineOfTrial?.nodesVisited[lastLineOfTrial.nodesVisited.length - 1] || 'none';
+
+    return t.lines.map((l, idx) => {
+      const kSeg = k?.segments[idx];
+      return [
+        `"${s?.lastName || ''}"`,
+        `"${s?.firstName || ''}"`,
+        s?.age || '',
+        `"${s?.gender || ''}"`,
+        `"${group}"`,
+        `"${t.subjectId}"`,
+        s?.isSolved ? '1' : '0',
+        t.trialId,
+        idx + 1,
+        `"${l.type}"`,
+        `"${l.type}"`,
+        isOverridden ? '1' : '0',
+        `"${l.nodesVisited.join('-')}"`,
+        km?.durationS ?? ((t.trial_time_ms || 0) / 1000).toFixed(2),
+        km?.movementTimeS ?? '',
+        km?.pauseTimeS ?? '',
+        km?.pauseCount ?? '',
+        km?.maxPauseS ?? '',
+        km?.peakVelocityMmS ?? '',
+        km?.avgVelocityPxMs ?? '',
+        kSeg ? (kSeg.durationMs / 1000).toFixed(2) : '',
+        kSeg?.lengthMm ?? '',
+        kSeg?.angleDeg ?? '',
+        (kSeg?.isOutsideBox || km?.isOutsideBox) ? '1' : '0',
+        trialFinishNode,
+        cal.offsetX,
+        cal.offsetY,
+        cal.scale
+      ].join(';');
+    });
+  });
+
+  return [headers.join(';'), ...rows].join('\n');
 };

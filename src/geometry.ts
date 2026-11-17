@@ -1,4 +1,5 @@
 import { Point, LineSegment, ProcessedTrial, GridNode, Calibration } from './types';
+import { analyzeKinematics } from './kinematics';
 
 export const CANVAS_SIZE = 800;
 export const DOT_RADIUS = 6;
@@ -6,6 +7,22 @@ export const ANGLE_THRESHOLD_SPLIT = 30; // Threshold for bend detection (degree
 export const MIN_LINE_LENGTH = 100;      // Minimum length to be considered a valid line (pixels)
 export const LOOKAHEAD_MIN_LENGTH = 50;   // Minimum length after bend to justify a split (pixels)
 export const SMOOTHING_WINDOW = 3;
+
+export const computeGridBoundingBox = (
+  nodes: GridNode[],
+  paddingX = 49,
+  paddingY = 54
+): { xl: number; xr: number; yu: number; yd: number } => {
+  if (!nodes || nodes.length === 0) return { xl: 0, xr: CANVAS_SIZE, yu: 0, yd: CANVAS_SIZE };
+  const xs = nodes.map(n => n.x);
+  const ys = nodes.map(n => n.y);
+  return {
+    xl: Math.min(...xs) - paddingX + 20,
+    xr: Math.max(...xs) + paddingX + 20,
+    yu: Math.min(...ys) - paddingY + 23,
+    yd: Math.max(...ys) + paddingY + 23
+  };
+};
 
 export const smoothPoints = (points: Point[], windowSize: number): Point[] => {
   if (points.length < windowSize) return points;
@@ -193,6 +210,10 @@ export const calibrateTrial = (
   const { lines, breakPoints, smoothed } = performSegmentation(calibratedPoints, angle, minLen);
   const updatedLines = recalculateLineNodes(lines, nodes, hitPadding);
 
+  // Compute kinematics with calibrated coordinates and node bounding box
+  const bbox = computeGridBoundingBox(nodes);
+  const kinematics = analyzeKinematics(calibratedPoints, bbox);
+
   return {
     ...trial,
     basePoints,
@@ -200,6 +221,7 @@ export const calibrateTrial = (
     smoothedPoints: smoothed,
     startPoint: calibratedPoints[0] || trial.startPoint,
     breakPoints,
-    lines: updatedLines
+    lines: updatedLines,
+    kinematics
   };
 };

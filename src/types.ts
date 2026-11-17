@@ -1,4 +1,6 @@
-// --- Domain Types for 9-Dots Research Lab (SIGMA-2.0) ---
+// --- Domain Types for M.O.G.N.U. (SIGMA-2.0 Evolution) ---
+
+export type AnalysisMode = 'kinematics' | 'geometry' | 'duplex';
 
 export interface Point {
   x: number;
@@ -12,6 +14,72 @@ export interface LineSegment {
   type: string;
 }
 
+export interface KinematicPeak {
+  dnIdx: number;
+  peakIdx: number;
+  upIdx: number;
+  t: number;
+  v: number;
+}
+
+export interface KinematicPause {
+  startIdx: number;
+  endIdx: number;
+  tStart: number;
+  tEnd: number;
+  durationMs: number;
+}
+
+export interface KinematicSegment {
+  startIdx: number;
+  endIdx: number;
+  tStart: number;
+  tEnd: number;
+  durationMs: number;
+  lengthPx: number;
+  lengthMm: number;
+  angleDeg: number;
+  isOutsideBox: boolean;
+  peakVelocityPxS?: number;
+  meanVelocityPxS?: number;
+}
+
+export interface KinematicMetrics {
+  durationMs: number;
+  durationS: number;
+  movementTimeMs: number;
+  movementTimeS: number;
+  movementTimeRatio?: number;
+  pauseTimeMs: number;
+  pauseTimeS: number;
+  pauseCount: number;
+  maxPauseMs: number;
+  maxPauseS: number;
+  peakVelocityPxMs: number;
+  peakVelocityMmS: number;
+  peakVelocityPxS?: number;
+  avgVelocityPxMs: number;
+  meanVelocityPxS?: number;
+  totalPathPx: number;
+  totalPathMm: number;
+  isOutsideBox: boolean;
+  outsideBoxTimeMs?: number;
+  outsideBoxTimeS?: number;
+  segmentsCount: number;
+  segmentCount?: number;
+}
+
+export interface TrialKinematics {
+  t: number[];          // interpolated 1 ms time grid
+  x: number[];          // 15 Hz filtered X
+  y: number[];          // 15 Hz filtered Y
+  vt: number[];         // instantaneous velocity profile (15 Hz)
+  peaks: KinematicPeak[];
+  pauses: KinematicPause[];
+  segments: KinematicSegment[];
+  metrics: KinematicMetrics;
+}
+
 export interface ProcessedTrial {
   subjectId: string;
   trialId: string | number;
@@ -22,6 +90,7 @@ export interface ProcessedTrial {
   lines: LineSegment[];
   breakPoints: Point[];
   trial_time_ms: number;
+  kinematics?: TrialKinematics;
 }
 
 export interface GridNode {
@@ -56,6 +125,7 @@ export interface SubjectData {
   insight?: string;
   totalTaskTime?: number;
   surveyScales?: Record<string, number>;
+  group?: string;
 }
 
 export interface HeatPoint {

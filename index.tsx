@@ -10,7 +10,7 @@ import {
 } from 'lucide-react';
 
 import {
-  Point, LineSegment, ProcessedTrial, GridNode, Calibration, SubjectData, HeatPoint, HeatLine
+  Point, LineSegment, ProcessedTrial, GridNode, Calibration, SubjectData, HeatPoint, HeatLine, AnalysisMode
 } from './src/types';
 import {
   CANVAS_SIZE, DOT_RADIUS, ANGLE_THRESHOLD_SPLIT, MIN_LINE_LENGTH, LOOKAHEAD_MIN_LENGTH,
@@ -21,8 +21,9 @@ import {
   parseNum, detectDelimiter, decodeBuffer, processCSV
 } from './src/parser';
 import {
-  generateFilteredCSV, generateAllDataCSV, generateStatsCSV
+  generateFilteredCSV, generateAllDataCSV, generateStatsCSV, generateKinematicsCSV, generateDuplexFullCSV
 } from './src/stats';
+import { KinematicsVelocityGraph } from './src/components/KinematicsVelocityGraph';
 
 
 const GlobalHeatMap: React.FC<{ 
@@ -412,6 +413,7 @@ const GlobalLineMap: React.FC<{
 
 
 const App: React.FC = () => {
+  const [analysisMode, setAnalysisMode] = useState<AnalysisMode>('duplex');
   const [processedData, setProcessedData] = useState<ProcessedTrial[]>([]);
   const [subjects, setSubjects] = useState<SubjectData[]>([]);
   const [activeSubjectId, setActiveSubjectId] = useState<string | null>(null);
@@ -832,6 +834,37 @@ const App: React.FC = () => {
     return processedData.find(t => t.trialId === selectedTrialId && t.subjectId === activeSubjectId) || null;
   }, [selectedTrialId, processedData, activeSubjectId]);
 
+  const handleAutoCenter = useCallback(() => {
+    if (!activeSubject) return;
+    const subTrials = processedData.filter(t => t.subjectId === activeSubject.id);
+    if (subTrials.length === 0) return;
+
+    let totalX = 0;
+    let totalY = 0;
+    let count = 0;
+
+    const trialsToScan = selectedTrial ? [selectedTrial] : subTrials;
+    trialsToScan.forEach(t => {
+      const pts = t.basePoints || t.points;
+      pts.forEach(p => {
+        totalX += p.x;
+        totalY += p.y;
+        count++;
+      });
+    });
+
+    if (count === 0) return;
+    const meanX = totalX / count;
+    const meanY = totalY / count;
+    const scale = activeSubject.calibration.scale || 1.0;
+
+    const autoOffsetX = Math.round((CANVAS_SIZE / 2 - meanX) * scale);
+    const autoOffsetY = Math.round((CANVAS_SIZE / 2 - meanY) * scale);
+
+    handleCalibrationChange({ offsetX: autoOffsetX, offsetY: autoOffsetY });
+    addLog(`🎯 Авто-подгонка к 9 точкам: смещение X=${autoOffsetX > 0 ? '+' : ''}${autoOffsetX}px, Y=${autoOffsetY > 0 ? '+' : ''}${autoOffsetY}px`);
+  }, [activeSubject, processedData, selectedTrial, handleCalibrationChange]);
+
   const trialsToDraw = useMemo(() => {
     return selectedTrialId !== null 
       ? (selectedTrial ? [selectedTrial] : [])
@@ -1216,6 +1249,28 @@ const App: React.FC = () => {
       }
     });
 
+    // Draw 9-dots bounding box in Kinematics or Duplex mode
+    if ((analysisMode === 'kinematics' || analysisMode === 'duplex') && activeNodes.length >= 9) {
+      const xs = activeNodes.map(n => n.x);
+      const ys = activeNodes.map(n => n.y);
+      const minX = Math.min(...xs);
+      const maxX = Math.max(...xs);
+      const minY = Math.min(...ys);
+      const maxY = Math.max(...ys);
+      
+      ctx.save();
+      ctx.strokeStyle = 'rgba(245, 158, 11, 0.45)';
+      ctx.lineWidth = 1.5 / viewScale;
+      ctx.setLineDash([6 / viewScale, 4 / viewScale]);
+      ctx.strokeRect(minX, minY, maxX - minX, maxY - minY);
+      
+      ctx.fillStyle = 'rgba(245, 158, 11, 0.75)';
+      ctx.font = `bold ${8 / viewScale}px sans-serif`;
+      ctx.textAlign = 'right';
+      ctx.fillText('РАМКА 9 ТОЧЕК', maxX, minY - (4 / viewScale));
+      ctx.restore();
+    }
+
     const trialsToDraw = selectedTrialId !== null 
       ? (selectedTrial ? [selectedTrial] : [])
       : filteredTrials;
@@ -1336,7 +1391,28 @@ const App: React.FC = () => {
       let totalOutsideLinesLength = 0;
       let totalOutsideLinesCount = 0;
 
+      let totalKinSpeed = 0;
+      let maxKinPeak = 0;
+      let totalPausesCount = 0;
+      let totalPauseTime = 0;
+      let trialsWithOutsideBox = 0;
+      let totalOutsideBoxTime = 0;
+      let validKinTrials = 0;
+
       data.forEach(t => {
+        if (t.kinematics) {
+          validKinTrials++;
+          totalKinSpeed += t.kinematics.metrics.meanVelocityPxS;
+          if (t.kinematics.metrics.peakVelocityPxS > maxKinPeak) {
+            maxKinPeak = t.kinematics.metrics.peakVelocityPxS;
+          }
+          totalPausesCount += t.kinematics.metrics.pauseCount;
+          totalPauseTime += t.kinematics.metrics.pauseTimeMs;
+          if (t.kinematics.metrics.outsideBoxTimeMs > 0) {
+            trialsWithOutsideBox++;
+          }
+          totalOutsideBoxTime += t.kinematics.metrics.outsideBoxTimeMs;
+        }
         const sub = subjects.find(s => s.id === t.subjectId);
         const subNodes = sub ? sub.nodes.map(n => ({
           ...n,
@@ -1401,7 +1477,14 @@ const App: React.FC = () => {
         totalTrials: data.length, totalOverrides,
         total_solution_time_ms, mean_trial_time_ms,
         linesBothEndsInNodes, linesAnyEndOutside,
-        avgAllLinesLength, avgOutsideLinesLength
+        avgAllLinesLength, avgOutsideLinesLength,
+        avgKinSpeed: validKinTrials > 0 ? totalKinSpeed / validKinTrials : 0,
+        maxKinPeak,
+        totalPausesCount,
+        avgPauseTimePerTrial: validKinTrials > 0 ? (totalPauseTime / validKinTrials) / 1000 : 0,
+        outsideBoxTrialRatio: validKinTrials > 0 ? (trialsWithOutsideBox / validKinTrials) * 100 : 0,
+        totalOutsideBoxTimeMs: totalOutsideBoxTime,
+        validKinTrials
       };
     };
 
@@ -1475,6 +1558,28 @@ const App: React.FC = () => {
     setSelectedTrialId(ids[nextIdx]);
   };
 
+  const exportKinematicsCSV = () => {
+    if (processedData.length === 0) return;
+    const csvContent = generateKinematicsCSV(processedData, subjects, subjectGroups);
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `MOGNU_kinematics_${new Date().toISOString().slice(0, 10)}.csv`;
+    link.click();
+    addLog("Экспортированы данные кинематики (MOGNU).");
+  };
+
+  const exportDuplexCSV = () => {
+    if (processedData.length === 0) return;
+    const csvContent = generateDuplexFullCSV(processedData, subjects, manualOverrides, subjectGroups);
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `MOGNU_duplex_full_report_${new Date().toISOString().slice(0, 10)}.csv`;
+    link.click();
+    addLog("Экспортирован полный дуплексный отчет (Геометрия + Кинематика).");
+  };
+
   const exportCSV = () => {
     const csvContent = generateFilteredCSV(filteredTrials, subjects, manualOverrides, subjectGroups);
     const blob = new Blob([csvContent], { type: 'text/csv' });
@@ -1490,17 +1595,19 @@ const App: React.FC = () => {
     const blob = new Blob([csvContent], { type: 'text/csv' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
-    link.download = `all_subjects_full_export_${new Date().toISOString().slice(0, 10)}.csv`;
+    link.download = `MOGNU_geometry_SIGMA_${new Date().toISOString().slice(0, 10)}.csv`;
     link.click();
+    addLog("Экспортированы геометрические данные (SIGMA).");
   };
 
   const exportStatsCSV = () => {
     const csvContent = generateStatsCSV(subjects, processedData, manualOverrides, excludedLines, subjectGroups);
-    const blob = new Blob([csvContent], { type: 'text/csv' });
+    const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
     link.download = `summary_statistics_${new Date().toISOString().slice(0, 10)}.csv`;
     link.click();
+    addLog("Экспортирована сводная статистика (с геометрией и кинематикой MOGNU).");
   };
 
   const exportSession = () => {
@@ -1575,20 +1682,75 @@ const App: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 p-4 md:p-8 font-sans">
-      <header className="max-w-[1720px] w-full mx-auto mb-8 flex flex-col md:flex-row justify-between items-center gap-4">
-        <div>
-          <h1 className="text-3xl font-black text-slate-900 flex items-center gap-3 tracking-tighter">
-            <Activity className="text-blue-600" size={32} />
-            SIGMA
-          </h1>
-          <p className="text-slate-500 font-bold ">Spatial Insight & Gesture Movement Analyzer</p>
+      <header className="max-w-[1720px] w-full mx-auto mb-8 flex flex-col xl:flex-row justify-between items-center gap-4">
+        <div className="flex items-center gap-4">
+          <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-blue-600 via-indigo-600 to-amber-500 flex items-center justify-center text-white shadow-lg shadow-indigo-100">
+            <Activity size={28} />
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <h1 className="text-3xl font-black text-slate-900 tracking-tighter">
+                M.O.G.N.U.
+              </h1>
+              <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 uppercase tracking-widest border border-indigo-200">
+                SIGMA 2.0 EVO
+              </span>
+            </div>
+            <p className="text-slate-500 font-bold text-xs">Motor Optimization, Geometry & Nine-dot Unifier</p>
+          </div>
         </div>
+
+        {/* 3 Analysis Modes Selector */}
+        <div className="flex items-center bg-slate-200/80 p-1.5 rounded-2xl gap-1 shadow-inner border border-slate-200">
+          <button 
+            onClick={() => setAnalysisMode('kinematics')} 
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black transition-all ${
+              analysisMode === 'kinematics' 
+                ? 'bg-amber-500 text-white shadow-md shadow-amber-200' 
+                : 'text-slate-600 hover:bg-white/60'
+            }`}
+            title="Режим кинематики: профили скорости V(t), паузы, пики, выходы за рамку"
+          >
+            <Zap size={15} /> ⚡ Кинематика
+          </button>
+          <button 
+            onClick={() => setAnalysisMode('geometry')} 
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black transition-all ${
+              analysisMode === 'geometry' 
+                ? 'bg-blue-600 text-white shadow-md shadow-blue-200' 
+                : 'text-slate-600 hover:bg-white/60'
+            }`}
+            title="Классическая СИГМА: 9 узлов, типы линий, фазы решения"
+          >
+            <Ruler size={15} /> 📐 Геометрия
+          </button>
+          <button 
+            onClick={() => setAnalysisMode('duplex')} 
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black transition-all ${
+              analysisMode === 'duplex' 
+                ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-md shadow-indigo-200' 
+                : 'text-slate-600 hover:bg-white/60'
+            }`}
+            title="Дуплексный режим: одновременно кинематический и геометрический анализ"
+          >
+            <Layers size={15} /> 🚀 MOGNУ Дуплекс
+          </button>
+        </div>
+
         {processedData.length > 0 || subjects.length > 0 ? (
           <div className="flex gap-2 flex-wrap justify-center">
             <button 
+              onClick={handleAutoCenter}
+              disabled={!activeSubject}
+              className="p-2.5 border rounded-xl transition-all bg-white border-slate-200 text-orange-600 hover:bg-orange-50 shadow-sm disabled:opacity-40"
+              title="🎯 Быстрая авто-подгонка рисунка к 9 точкам"
+            >
+              <Target size={20} />
+            </button>
+            <button 
               onClick={() => setIsCalibrating(!isCalibrating)}
               className={`p-2.5 border rounded-xl transition-all ${isCalibrating ? 'bg-orange-600 border-orange-700 text-white shadow-lg ring-4 ring-orange-100' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'}`}
-              title="Режим калибровки"
+              title="Режим ручной калибровки (стрелки, масштаб)"
             >
               <Settings2 size={20} className={isCalibrating ? "animate-spin-slow" : ""} />
             </button>
@@ -1697,9 +1859,18 @@ const App: React.FC = () => {
                     <button onClick={() => handleCalibrationChange(prev => ({ hitPadding: prev.hitPadding + 1 }))} className="p-2.5 bg-white rounded-xl text-orange-600 shadow-sm hover:bg-orange-100 transition-colors"><Plus size={16} /></button>
                   </div>
                 </div>
+                <div className="pt-2">
+                  <button 
+                    onClick={handleAutoCenter}
+                    className="w-full py-2.5 px-4 bg-gradient-to-r from-orange-500 to-amber-500 text-white font-black text-xs rounded-xl shadow-md hover:from-orange-600 hover:to-amber-600 transition-all flex items-center justify-center gap-2"
+                    title="Автоматически центрировать координаты рисунка относительно 9 точек"
+                  >
+                    <Target size={16} /> 🎯 Авто-подгонка к 9 точкам
+                  </button>
+                </div>
                 <div className="pt-2 border-t border-orange-200 flex justify-between gap-2">
-                  <button onClick={() => handleCalibrationChange({ offsetX: 0, offsetY: 0, scale: 1.0 })} className="text-[10px] font-bold text-orange-500">Сброс</button>
-                  <button onClick={() => setIsCalibrating(false)} className="px-6 py-2 bg-orange-600 text-white rounded-xl text-xs font-bold">Готово</button>
+                  <button onClick={() => handleCalibrationChange({ offsetX: 0, offsetY: 0, scale: 1.0 })} className="text-[10px] font-bold text-orange-500 hover:underline">Сброс</button>
+                  <button onClick={() => setIsCalibrating(false)} className="px-6 py-2 bg-orange-600 text-white rounded-xl text-xs font-bold hover:bg-orange-700 transition-colors">Готово</button>
                 </div>
                 <div className="text-[9px] text-orange-500/80 font-medium italic text-center">Перетаскивайте нарисованное решение прямо на холсте для точной калибровки</div>
               </div>
@@ -1849,13 +2020,50 @@ const App: React.FC = () => {
                       </div>
                       <p className="text-sm font-black text-slate-600">{stats.totalTrials}</p>
                    </div>
-                   <div className="flex items-center justify-between p-3 bg-amber-50 rounded-2xl border border-amber-100">
-                      <div className="flex items-center gap-2">
-                         <Zap size={16} className="text-amber-500" />
-                         <p className="text-[10px] font-black uppercase text-amber-500 tracking-tight">Тип 1-й линии (1-я проба)</p>
+                   {/* Kinematic metrics when in kinematics or duplex mode */}
+                    {(analysisMode === 'kinematics' || analysisMode === 'duplex') && (
+                      <>
+                        <div className="flex items-center justify-between p-3 bg-amber-50 rounded-2xl border border-amber-100">
+                          <div className="flex items-center gap-2">
+                            <Zap size={16} className="text-amber-500" />
+                            <p className="text-[10px] font-black uppercase text-amber-500 tracking-tight">Ср. скорость (движение)</p>
+                          </div>
+                          <p className="text-sm font-black text-amber-700">{stats.avgKinSpeed.toFixed(1)} px/s</p>
+                        </div>
+                        <div className="flex items-center justify-between p-3 bg-amber-50 rounded-2xl border border-amber-100">
+                          <div className="flex items-center gap-2">
+                            <Zap size={16} className="text-amber-500" />
+                            <p className="text-[10px] font-black uppercase text-amber-500 tracking-tight">Макс. пик скорости</p>
+                          </div>
+                          <p className="text-sm font-black text-amber-700">{stats.maxKinPeak.toFixed(1)} px/s</p>
+                        </div>
+                        <div className="flex items-center justify-between p-3 bg-yellow-50 rounded-2xl border border-yellow-200">
+                          <div className="flex items-center gap-2">
+                            <Timer size={16} className="text-yellow-600" />
+                            <p className="text-[10px] font-black uppercase text-yellow-700 tracking-tight">Ср. время пауз / проба</p>
+                          </div>
+                          <p className="text-sm font-black text-yellow-800">{stats.avgPauseTimePerTrial.toFixed(2)} с</p>
+                        </div>
+                        <div className="flex items-center justify-between p-3 bg-orange-50 rounded-2xl border border-orange-200">
+                          <div className="flex items-center gap-2">
+                            <Target size={16} className="text-orange-500" />
+                            <p className="text-[10px] font-black uppercase text-orange-600 tracking-tight">Проб с выходом за рамку</p>
+                          </div>
+                          <p className="text-sm font-black text-orange-800">{stats.outsideBoxTrialRatio.toFixed(1)}%</p>
+                        </div>
+                      </>
+                    )}
+
+                    {/* Geometry metrics when in geometry or duplex mode */}
+                    {(analysisMode === 'geometry' || analysisMode === 'duplex') && (
+                      <div className="flex items-center justify-between p-3 bg-amber-50 rounded-2xl border border-amber-100">
+                         <div className="flex items-center gap-2">
+                            <Zap size={16} className="text-amber-500" />
+                            <p className="text-[10px] font-black uppercase text-amber-500 tracking-tight">Тип 1-й линии (1-я проба)</p>
+                         </div>
+                         <p className="text-sm font-black text-amber-700 uppercase tracking-tighter">{stats.firstTrialFirstLineType}</p>
                       </div>
-                      <p className="text-sm font-black text-amber-700 uppercase tracking-tighter">{stats.firstTrialFirstLineType}</p>
-                   </div>
+                    )}
                    <div className="flex items-center justify-between p-3 bg-emerald-50 rounded-2xl border border-emerald-100">
                       <div className="flex items-center gap-2">
                          <CheckSquare size={16} className="text-emerald-500" />
@@ -2062,7 +2270,197 @@ const App: React.FC = () => {
             )}
           </div>
 
-          {processedData.length > 0 && (
+          {/* Kinematics Section when in kinematics or duplex mode */}
+          {(analysisMode === 'kinematics' || analysisMode === 'duplex') && (
+            <div className="bg-white p-6 md:p-8 rounded-[32px] shadow-xl border border-slate-100 animate-in fade-in duration-200">
+              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 mb-6 pb-4 border-b border-slate-100">
+                <div className="flex items-center gap-3">
+                  <div className="p-2.5 bg-amber-50 text-amber-600 rounded-2xl">
+                    <Zap size={22} />
+                  </div>
+                  <div>
+                    <h2 className="text-lg font-black text-slate-900 tracking-tight flex items-center gap-2">
+                      Кинематика движений (M.O.G.N.U.)
+                      {selectedTrial && (
+                        <span className="text-xs px-2.5 py-1 bg-amber-100 text-amber-800 rounded-xl font-bold">
+                          Проба #{selectedTrial.trialId}
+                        </span>
+                      )}
+                    </h2>
+                    <p className="text-xs text-slate-400 font-medium">
+                      {selectedTrial 
+                        ? 'Профиль тангенциальной скорости V(t), паузы размышления и фазовые пики' 
+                        : 'Сводные кинематические показатели испытуемого по всем пробам'}
+                    </p>
+                  </div>
+                </div>
+                {selectedTrial && (
+                  <button
+                    onClick={() => setSelectedTrialId(null)}
+                    className="text-xs font-bold text-slate-400 hover:text-slate-600 px-3 py-1.5 rounded-xl bg-slate-50 hover:bg-slate-100 transition-colors"
+                  >
+                    Свернуть в обзор
+                  </button>
+                )}
+              </div>
+
+              {selectedTrial ? (
+                <div className="space-y-6">
+                  {/* Trial Metric Badges */}
+                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+                    <div className="p-3 bg-amber-50/70 rounded-2xl border border-amber-100">
+                      <span className="text-[9px] font-black uppercase text-amber-600 block">V mean</span>
+                      <span className="text-base font-black text-amber-900">
+                        {selectedTrial.kinematics?.metrics.meanVelocityPxS.toFixed(1) || '0.0'}
+                      </span>
+                      <span className="text-[9px] text-amber-600/80 font-bold ml-1">px/s</span>
+                    </div>
+
+                    <div className="p-3 bg-amber-50/70 rounded-2xl border border-amber-100">
+                      <span className="text-[9px] font-black uppercase text-amber-600 block">V peak</span>
+                      <span className="text-base font-black text-amber-900">
+                        {selectedTrial.kinematics?.metrics.peakVelocityPxS.toFixed(1) || '0.0'}
+                      </span>
+                      <span className="text-[9px] text-amber-600/80 font-bold ml-1">px/s</span>
+                    </div>
+
+                    <div className="p-3 bg-yellow-50/70 rounded-2xl border border-yellow-200">
+                      <span className="text-[9px] font-black uppercase text-yellow-700 block">Паузы</span>
+                      <span className="text-base font-black text-yellow-900">
+                        {selectedTrial.kinematics?.metrics.pauseCount || 0}
+                      </span>
+                      <span className="text-[9px] text-yellow-700 font-bold ml-1">
+                        ({selectedTrial.kinematics?.metrics.pauseTimeS.toFixed(1) || 0} с)
+                      </span>
+                    </div>
+
+                    <div className="p-3 bg-indigo-50/70 rounded-2xl border border-indigo-100">
+                      <span className="text-[9px] font-black uppercase text-indigo-600 block">Движение</span>
+                      <span className="text-base font-black text-indigo-900">
+                        {selectedTrial.kinematics?.metrics.movementTimeS.toFixed(1) || '0.0'}
+                      </span>
+                      <span className="text-[9px] text-indigo-600 font-bold ml-1">с</span>
+                    </div>
+
+                    <div className={`p-3 rounded-2xl border ${
+                      (selectedTrial.kinematics?.metrics.outsideBoxTimeMs || 0) > 0 
+                        ? 'bg-rose-50 border-rose-200 text-rose-900' 
+                        : 'bg-slate-50 border-slate-200 text-slate-700'
+                    }`}>
+                      <span className="text-[9px] font-black uppercase block opacity-70">Вне 9 точек</span>
+                      <span className="text-base font-black">
+                        {(selectedTrial.kinematics?.metrics.outsideBoxTimeMs || 0) > 0 ? 'ДА' : 'НЕТ'}
+                      </span>
+                      {(selectedTrial.kinematics?.metrics.outsideBoxTimeMs || 0) > 0 && (
+                        <span className="text-[9px] font-bold ml-1">
+                          ({selectedTrial.kinematics?.metrics.outsideBoxTimeS.toFixed(1)} с)
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="p-3 bg-slate-50 rounded-2xl border border-slate-100">
+                      <span className="text-[9px] font-black uppercase text-slate-500 block">Штрихов</span>
+                      <span className="text-base font-black text-slate-800">
+                        {selectedTrial.kinematics?.metrics.segmentCount || 0}
+                      </span>
+                      <span className="text-[9px] text-slate-400 font-bold ml-1">сегм.</span>
+                    </div>
+                  </div>
+
+                  {/* Velocity Graph Canvas */}
+                  <KinematicsVelocityGraph kinematics={selectedTrial.kinematics} />
+
+                  {/* Segments / Strokes Breakdown */}
+                  {selectedTrial.kinematics?.segments && selectedTrial.kinematics.segments.length > 0 && (
+                    <div className="space-y-2">
+                      <div className="flex justify-between items-center">
+                        <h4 className="text-xs font-black uppercase tracking-wider text-slate-400">
+                          Сегменты движения (штрихи)
+                        </h4>
+                        <span className="text-[10px] text-slate-400 font-medium">
+                          Всего {selectedTrial.kinematics.segments.length} сегментов
+                        </span>
+                      </div>
+                      <div className="max-h-48 overflow-y-auto custom-scrollbar border border-slate-100 rounded-2xl">
+                        <table className="w-full text-left text-[11px]">
+                          <thead className="bg-slate-50 text-slate-400 uppercase text-[9px] sticky top-0">
+                            <tr>
+                              <th className="py-2.5 px-3">#</th>
+                              <th className="py-2.5 px-3">Старт (с)</th>
+                              <th className="py-2.5 px-3">Конец (с)</th>
+                              <th className="py-2.5 px-3">Длит-ть</th>
+                              <th className="py-2.5 px-3">V max</th>
+                              <th className="py-2.5 px-3">V mean</th>
+                              <th className="py-2.5 px-3">Угол (°)</th>
+                              <th className="py-2.5 px-3">Рамка</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {selectedTrial.kinematics.segments.map((seg, sIdx) => (
+                              <tr key={sIdx} className="hover:bg-slate-50/70 transition-colors">
+                                <td className="py-2 px-3 font-bold text-slate-700">#{sIdx + 1}</td>
+                                <td className="py-2 px-3 text-slate-500">{(seg.tStart / 1000).toFixed(2)} с</td>
+                                <td className="py-2 px-3 text-slate-500">{(seg.tEnd / 1000).toFixed(2)} с</td>
+                                <td className="py-2 px-3 font-medium text-slate-800">{Math.round(seg.durationMs)} мс</td>
+                                <td className="py-2 px-3 font-bold text-amber-600">{Math.round(seg.peakVelocityPxS)} px/s</td>
+                                <td className="py-2 px-3 text-slate-600">{Math.round(seg.meanVelocityPxS)} px/s</td>
+                                <td className="py-2 px-3 text-slate-500">{Math.round(seg.angleDeg)}°</td>
+                                <td className="py-2 px-3">
+                                  <span className={`px-2 py-0.5 rounded-full text-[9px] font-bold ${
+                                    seg.isOutsideBox 
+                                      ? 'bg-rose-100 text-rose-700' 
+                                      : 'bg-slate-100 text-slate-500'
+                                  }`}>
+                                    {seg.isOutsideBox ? 'ВНЕ' : 'ВНУТРИ'}
+                                  </span>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    <div className="p-4 bg-amber-50/70 rounded-2xl border border-amber-100">
+                      <span className="text-[10px] font-black uppercase text-amber-600 block mb-1">Ср. скорость движения</span>
+                      <span className="text-xl font-black text-amber-900">{stats.avgKinSpeed.toFixed(1)}</span>
+                      <span className="text-xs text-amber-700 font-bold ml-1">px/s</span>
+                    </div>
+
+                    <div className="p-4 bg-amber-50/70 rounded-2xl border border-amber-100">
+                      <span className="text-[10px] font-black uppercase text-amber-600 block mb-1">Макс. пик скорости</span>
+                      <span className="text-xl font-black text-amber-900">{stats.maxKinPeak.toFixed(1)}</span>
+                      <span className="text-xs text-amber-700 font-bold ml-1">px/s</span>
+                    </div>
+
+                    <div className="p-4 bg-yellow-50/70 rounded-2xl border border-yellow-200">
+                      <span className="text-[10px] font-black uppercase text-yellow-700 block mb-1">Ср. время пауз / проба</span>
+                      <span className="text-xl font-black text-yellow-900">{stats.avgPauseTimePerTrial.toFixed(2)}</span>
+                      <span className="text-xs text-yellow-700 font-bold ml-1">с</span>
+                    </div>
+
+                    <div className="p-4 bg-orange-50/70 rounded-2xl border border-orange-200">
+                      <span className="text-[10px] font-black uppercase text-orange-700 block mb-1">Выход за рамку 9 точек</span>
+                      <span className="text-xl font-black text-orange-900">{stats.outsideBoxTrialRatio.toFixed(1)}</span>
+                      <span className="text-xs text-orange-700 font-bold ml-1">% проб</span>
+                    </div>
+                  </div>
+
+                  <div className="p-4 bg-slate-50 rounded-2xl border border-dashed border-slate-200 text-center">
+                    <p className="text-xs text-slate-500 font-medium">
+                      💡 Кликните по любой пробе в логе или на холсте, чтобы увидеть её динамический график V(t), паузы размышления и штрихи
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {processedData.length > 0 && (analysisMode === 'geometry' || analysisMode === 'duplex') && (
             <>
               {usePhasedMode && stats.phases && (
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
@@ -2239,6 +2637,57 @@ const App: React.FC = () => {
                 <Download size={16} className="text-blue-500" /> Экспорт данных
               </h2>
               <div className="flex flex-col gap-3">
+                {/* 3 Selectable Mode Exports */}
+                <button 
+                  onClick={exportKinematicsCSV} 
+                  className={`w-full flex items-center justify-between px-4 py-3.5 rounded-2xl font-black transition-all group shadow-sm ${
+                    analysisMode === 'kinematics' 
+                      ? 'bg-amber-500 text-white shadow-amber-200 ring-2 ring-amber-400' 
+                      : 'bg-amber-50 text-amber-900 hover:bg-amber-100'
+                  }`}
+                  title="Экспорт кинематических метрик (скорость, паузы, пики, выходы за рамку)"
+                >
+                  <span className="flex items-center gap-3 text-sm">
+                    <Zap size={18} className={analysisMode === 'kinematics' ? 'text-white' : 'text-amber-600'} /> 
+                    <span>⚡ Экспорт Кинематики (.csv)</span>
+                  </span>
+                  <ChevronRight size={16} className="opacity-60 group-hover:opacity-100 transition-opacity" />
+                </button>
+
+                <button 
+                  onClick={exportAllDataCSV} 
+                  className={`w-full flex items-center justify-between px-4 py-3.5 rounded-2xl font-black transition-all group shadow-sm ${
+                    analysisMode === 'geometry' 
+                      ? 'bg-blue-600 text-white shadow-blue-200 ring-2 ring-blue-400' 
+                      : 'bg-blue-50 text-blue-900 hover:bg-blue-100'
+                  }`}
+                  title="Экспорт классической геометрии SIGMA (узлы, типы линий, фазы)"
+                >
+                  <span className="flex items-center gap-3 text-sm">
+                    <Ruler size={18} className={analysisMode === 'geometry' ? 'text-white' : 'text-blue-600'} /> 
+                    <span>📐 Экспорт Геометрии (.csv)</span>
+                  </span>
+                  <ChevronRight size={16} className="opacity-60 group-hover:opacity-100 transition-opacity" />
+                </button>
+
+                <button 
+                  onClick={exportDuplexCSV} 
+                  className={`w-full flex items-center justify-between px-4 py-3.5 rounded-2xl font-black transition-all group shadow-lg ${
+                    analysisMode === 'duplex' 
+                      ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-indigo-200 ring-2 ring-purple-400' 
+                      : 'bg-slate-100 text-slate-800 hover:bg-slate-200'
+                  }`}
+                  title="Экспорт полного дуплексного отчета (Геометрия + Кинематика MOGNU)"
+                >
+                  <span className="flex items-center gap-3 text-sm">
+                    <Layers size={18} className={analysisMode === 'duplex' ? 'text-white' : 'text-indigo-600'} /> 
+                    <span>🚀 Полный Дуплекс Экспорт (.csv)</span>
+                  </span>
+                  <ChevronRight size={16} className="opacity-60 group-hover:opacity-100 transition-opacity" />
+                </button>
+
+                <div className="w-full h-[1px] bg-slate-100 my-1" />
+
                 <button 
                   onClick={exportCSV} 
                   className="w-full flex items-center justify-between px-4 py-3.5 bg-slate-100 text-slate-900 rounded-2xl font-bold hover:bg-slate-200 transition-all group shadow-sm"

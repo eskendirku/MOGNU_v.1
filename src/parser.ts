@@ -1,5 +1,6 @@
 import { Point, LineSegment, ProcessedTrial, GridNode, CSVParseResult } from './types';
-import { CANVAS_SIZE, DOT_RADIUS, ANGLE_THRESHOLD_SPLIT, MIN_LINE_LENGTH, performSegmentation, distToSegment, classifyLine } from './geometry';
+import { CANVAS_SIZE, DOT_RADIUS, ANGLE_THRESHOLD_SPLIT, MIN_LINE_LENGTH, performSegmentation, distToSegment, classifyLine, computeGridBoundingBox } from './geometry';
+import { analyzeKinematics } from './kinematics';
 
 export const parseNum = (str: string): number => {
   if (!str) return NaN;
@@ -299,6 +300,7 @@ export const processCSV = (
   const rx = dx / 2;
   const ry = dy / 2;
   const trials: ProcessedTrial[] = [];
+  const gridBBox = computeGridBoundingBox(extractedNodes);
 
   trialsMap.forEach((points, trialId) => {
     if (points.length < 2) return;
@@ -329,6 +331,8 @@ export const processCSV = (
       };
     });
 
+    const kinematics = analyzeKinematics(points, gridBBox);
+
     if (lineSegments.length > 0) {
       trials.push({
         subjectId,
@@ -339,7 +343,8 @@ export const processCSV = (
         startPoint: points[0],
         lines: lineSegments,
         breakPoints,
-        trial_time_ms
+        trial_time_ms,
+        kinematics
       });
     }
   });
