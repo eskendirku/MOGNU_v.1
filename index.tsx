@@ -448,6 +448,7 @@ const App: React.FC = () => {
   }, [debouncedAngle, debouncedMinLen, calibrateTrial]);
   const [manualOverrides, setManualOverrides] = useState<Set<string>>(new Set());
   const [excludedLines, setExcludedLines] = useState<Set<string>>(new Set());
+  const [excludedSubjects, setExcludedSubjects] = useState<Set<string>>(new Set());
   const [subjectGroups, setSubjectGroups] = useState<Record<string, string>>({});
   const [selectedTrialId, setSelectedTrialId] = useState<string | number | null>(null);
   const [hoveredTrialId, setHoveredTrialId] = useState<string | number | null>(null);
@@ -488,6 +489,16 @@ const App: React.FC = () => {
   }, [activeSubject]);
 
   const addLog = (msg: string) => setLog(prev => [...prev.slice(-10), msg]);
+
+  const toggleExcludeSubject = (sId: string) => {
+    const newExcluded = new Set(excludedSubjects);
+    if (newExcluded.has(sId)) {
+      newExcluded.delete(sId);
+    } else {
+      newExcluded.add(sId);
+    }
+    setExcludedSubjects(newExcluded);
+  };
 
   useEffect(() => {
     if (isCalibrating) {
@@ -1601,7 +1612,7 @@ const App: React.FC = () => {
   };
 
   const exportStatsCSV = () => {
-    const csvContent = generateStatsCSV(subjects, processedData, manualOverrides, excludedLines, subjectGroups);
+    const csvContent = generateStatsCSV(subjects, processedData, manualOverrides, excludedLines, subjectGroups, excludedSubjects);
     const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
@@ -1882,7 +1893,14 @@ const App: React.FC = () => {
               <h2 className="text-lg font-bold mb-6 flex items-center gap-2"><Users size={20} className="text-indigo-500" /> Испытуемые</h2>
               <div className="space-y-2 max-h-[300px] overflow-y-auto pr-2 custom-scrollbar">
                 {subjects.map(s => (
-                  <div key={s.id} className="flex gap-2 group">
+                  <div key={s.id} className={`flex gap-2 group ${excludedSubjects.has(s.id) ? 'opacity-40 grayscale' : ''}`}>
+                    <button 
+                      onClick={() => toggleExcludeSubject(s.id)}
+                      className={`p-3 rounded-xl border transition-all ${excludedSubjects.has(s.id) ? 'bg-red-50 border-red-200 text-red-500' : 'bg-white border-slate-100 text-slate-300 hover:border-red-200 hover:text-red-400'}`}
+                      title={excludedSubjects.has(s.id) ? "Включить испытуемого в анализ" : "Исключить испытуемого из анализа"}
+                    >
+                      <X size={16} />
+                    </button>
                     <button 
                       onClick={() => { setActiveSubjectId(s.id); setSelectedTrialId(null); }}
                       className={`flex-1 flex justify-between items-center p-3 rounded-xl transition-all ${activeSubjectId === s.id ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-200' : 'bg-slate-50 text-slate-600 hover:bg-slate-100'} ${s.isSolved ? 'ring-1 ring-yellow-400/50 shadow-inner' : ''}`}

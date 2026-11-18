@@ -171,8 +171,12 @@ export const generateStatsCSV = (
   processedData: ProcessedTrial[],
   manualOverrides: Set<string>,
   excludedLines: Set<string>,
-  subjectGroups: Record<string, string>
+  subjectGroups: Record<string, string>,
+  excludedSubjects: Set<string>
 ): string => {
+  subjects = subjects.filter(s => !excludedSubjects.has(s.id));
+  processedData = processedData.filter(t => !excludedSubjects.has(t.subjectId));
+
   const lineTypes = ['боковая', 'центральная', 'диагональная', 'хордовая', 'хорды_длинные', 'внешняя', 'касательная', 'прочая'];
   const nodeIds = [1, 2, 3, 4, 5, 6, 7, 8, 9];
 
