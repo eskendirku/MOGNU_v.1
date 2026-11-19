@@ -225,3 +225,327 @@ export const calibrateTrial = (
     kinematics
   };
 };
+
+export type TargetZoneId = 'TR_H' | 'TR_V' | 'BR_H' | 'BR_V' | 'BL_H' | 'BL_V' | 'TL_H' | 'TL_V';
+
+export interface TargetZoneInfo {
+  id: TargetZoneId;
+  name: string;
+  x: number;
+  y: number;
+}
+
+export interface ApexOvershootResult {
+  hasExit: boolean;
+  activeZoneId: TargetZoneId | null;
+  activeZoneName: string | null;
+  turnPoint: Point | null;
+  startPoint: Point | null;
+  overshootPx: number;
+  deltaL: number;
+  absDeltaL: number;
+  status: 'hit' | 'undershoot' | 'overshoot' | 'inside';
+}
+
+export const TARGET_ZONES_DEF: { id: TargetZoneId; name: string }[] = [
+  { id: 'TR_H', name: 'Справа-сверху (гор.)' },
+  { id: 'TR_V', name: 'Сверху-справа (верт.)' },
+  { id: 'BR_H', name: 'Справа-снизу (гор.)' },
+  { id: 'BR_V', name: 'Снизу-справа (верт.)' },
+  { id: 'BL_H', name: 'Слева-снизу (гор.)' },
+  { id: 'BL_V', name: 'Снизу-слева (верт.)' },
+  { id: 'TL_H', name: 'Слева-сверху (гор.)' },
+  { id: 'TL_V', name: 'Сверху-слева (верт.)' }
+];
+
+export const getTargetZones = (nodes: GridNode[], step = 116, boxPadding = 15): TargetZoneInfo[] => {
+  if (!nodes || nodes.length < 9) return [];
+  const xs = nodes.map(n => n.x);
+  const ys = nodes.map(n => n.y);
+  const rawMinX = Math.min(...xs);
+  const rawMaxX = Math.max(...xs);
+  const rawMinY = Math.min(...ys);
+  const rawMaxY = Math.max(...ys);
+
+  const minX = rawMinX - boxPadding;
+  const maxX = rawMaxX + boxPadding;
+  const minY = rawMinY - boxPadding;
+  const maxY = rawMaxY + boxPadding;
+
+  return [
+    { id: 'TR_H', name: 'Справа-сверху (гор.)', x: maxX + step, y: rawMinY },
+    { id: 'TR_V', name: 'Сверху-справа (верт.)', x: rawMaxX, y: minY - step },
+    { id: 'BR_H', name: 'Справа-снизу (гор.)', x: maxX + step, y: rawMaxY },
+    { id: 'BR_V', name: 'Снизу-справа (верт.)', x: rawMaxX, y: maxY + step },
+    { id: 'BL_H', name: 'Слева-снизу (гор.)', x: minX - step, y: rawMaxY },
+    { id: 'BL_V', name: 'Снизу-слева (верт.)', x: rawMinX, y: maxY + step },
+    { id: 'TL_H', name: 'Слева-сверху (гор.)', x: minX - step, y: rawMinY },
+    { id: 'TL_V', name: 'Сверху-слева (верт.)', x: rawMinX, y: minY - step }
+  ];
+};
+
+export interface ApexExtractionOptions {
+  idealStep?: number;       // default 116.0
+  tolerance?: number;       // default 65.0 (Variant 1: [51 .. 181 px])
+  boxPadding?: number;      // default 15.0 (ручной отступ перцептивного квадрата от точек)
+  isSolvedTrial?: boolean;  // whether this trial solves the problem
+  solveOverride?: boolean;  // Option 1: if true and isSolvedTrial -> error = 0, status = 'hit'
+  capMaxError?: boolean;    // Option 3: if true -> absDeltaL capped at idealStep (baseline penalty)
+  overrideZoneId?: TargetZoneId | null; // Manual override: clicked target zone circle
+}
+
+export const extractTrialApexOvershoot = (
+  trial: ProcessedTrial,
+  nodes: GridNode[],
+  idealStepOrOptions?: number | ApexExtractionOptions,
+  toleranceParam = 65.0,
+  isSolvedTrialParam = false,
+  solveOverrideParam = false,
+  capMaxErrorParam = false,
+  boxPaddingParam = 15.0,
+  overrideZoneIdParam: TargetZoneId | null = null
+): ApexOvershootResult => {
+  let idealStep = 116.0;
+  let tolerance = 65.0;
+  let boxPadding = 15.0;
+  let isSolvedTrial = false;
+  let solveOverride = false;
+  let capMaxError = false;
+  let overrideZoneId: TargetZoneId | null = null;
+
+  if (typeof idealStepOrOptions === 'object' && idealStepOrOptions !== null) {
+    idealStep = idealStepOrOptions.idealStep ?? 116.0;
+    tolerance = idealStepOrOptions.tolerance ?? 65.0;
+    boxPadding = idealStepOrOptions.boxPadding ?? 15.0;
+    isSolvedTrial = !!idealStepOrOptions.isSolvedTrial;
+    solveOverride = !!idealStepOrOptions.solveOverride;
+    capMaxError = !!idealStepOrOptions.capMaxError;
+    overrideZoneId = idealStepOrOptions.overrideZoneId ?? null;
+  } else {
+    if (typeof idealStepOrOptions === 'number') idealStep = idealStepOrOptions;
+    tolerance = toleranceParam;
+    isSolvedTrial = isSolvedTrialParam;
+    solveOverride = solveOverrideParam;
+    capMaxError = capMaxErrorParam;
+    boxPadding = boxPaddingParam;
+    overrideZoneId = overrideZoneIdParam;
+  }
+
+  const defaultNoExit: ApexOvershootResult = {
+    hasExit: false,
+    activeZoneId: null,
+    activeZoneName: null,
+    turnPoint: null,
+    startPoint: null,
+    overshootPx: 0,
+    deltaL: (isSolvedTrial && solveOverride) ? 0 : -idealStep,
+    absDeltaL: (isSolvedTrial && solveOverride) ? 0 : idealStep,
+    status: (isSolvedTrial && solveOverride) ? 'hit' : 'inside'
+  };
+
+  if (!trial || !trial.lines || trial.lines.length === 0 || !nodes || nodes.length < 9) {
+    return defaultNoExit;
+  }
+
+  const xs = nodes.map(n => n.x);
+  const ys = nodes.map(n => n.y);
+  const rawMinX = Math.min(...xs);
+  const rawMaxX = Math.max(...xs);
+  const rawMinY = Math.min(...ys);
+  const rawMaxY = Math.max(...ys);
+
+  // Perceptual bounding square boundaries with manual/custom padding (default 15px from outer pixels)
+  const minX = rawMinX - boxPadding;
+  const maxX = rawMaxX + boxPadding;
+  const minY = rawMinY - boxPadding;
+  const maxY = rawMaxY + boxPadding;
+  const midX = (rawMinX + rawMaxX) / 2;
+  const midY = (rawMinY + rawMaxY) / 2;
+
+  // Margin for checking starting inside (within the padded perceptual square)
+  const insideMargin = 10;
+  // Threshold to consider a point definitely outside the perceptual square
+  const exitMargin = 5;
+
+  interface CandidateExit {
+    lineIndex: number;
+    startPoint: Point;
+    endPoint: Point;
+    activeZoneId: TargetZoneId;
+    overshootPx: number;
+  }
+
+  const candidateExits: CandidateExit[] = [];
+
+  trial.lines.forEach((line, lineIdx) => {
+    if (!line.points || line.points.length < 2) return;
+
+    const pStart = line.points[0];
+    const pEnd = line.points[line.points.length - 1];
+
+    // Condition 1: Line must start INSIDE the perceptual square (within dots area + padding)
+    const startsInside =
+      pStart.x >= minX - insideMargin &&
+      pStart.x <= maxX + insideMargin &&
+      pStart.y >= minY - insideMargin &&
+      pStart.y <= maxY + insideMargin;
+
+    if (!startsInside) {
+      // Per user rule: If line started outside the square, do not count it
+      return;
+    }
+
+    // Condition 2: Line end point must be OUTSIDE the perceptual square
+    const isEndOutside =
+      pEnd.x > maxX + exitMargin ||
+      pEnd.x < minX - exitMargin ||
+      pEnd.y > maxY + exitMargin ||
+      pEnd.y < minY - exitMargin;
+
+    if (!isEndOutside) return;
+
+    // Movement vector from line start to end
+    const dx = pEnd.x - pStart.x;
+    const dy = pEnd.y - pStart.y;
+    const absDx = Math.abs(dx);
+    const absDy = Math.abs(dy);
+
+    let zoneId: TargetZoneId;
+    let overshootPx = 0;
+
+    // Determine direction: horizontal vs vertical
+    if (absDx >= absDy) {
+      // Horizontal motion
+      if (dx > 0) {
+        // Rightward exit
+        zoneId = pEnd.y <= midY ? 'TR_H' : 'BR_H';
+        overshootPx = Math.max(0, pEnd.x - maxX);
+      } else {
+        // Leftward exit
+        zoneId = pEnd.y <= midY ? 'TL_H' : 'BL_H';
+        overshootPx = Math.max(0, minX - pEnd.x);
+      }
+    } else {
+      // Vertical motion
+      if (dy < 0) {
+        // Upward exit
+        zoneId = pEnd.x <= midX ? 'TL_V' : 'TR_V';
+        overshootPx = Math.max(0, minY - pEnd.y);
+      } else {
+        // Downward exit
+        zoneId = pEnd.x <= midX ? 'BL_V' : 'BR_V';
+        overshootPx = Math.max(0, pEnd.y - maxY);
+      }
+    }
+
+    if (overshootPx > 5) {
+      candidateExits.push({
+        lineIndex: lineIdx,
+        startPoint: pStart,
+        endPoint: pEnd,
+        activeZoneId: zoneId,
+        overshootPx
+      });
+    }
+  });
+
+  let bestExit: CandidateExit | null = null;
+
+  if (overrideZoneId) {
+    // 1. Try to find a candidate exit that matches overrideZoneId
+    const matching = candidateExits.find(c => c.activeZoneId === overrideZoneId);
+    if (matching) {
+      bestExit = matching;
+    } else {
+      // 2. Compute overshoot directly relative to overrideZoneId across all line endpoints
+      let bestDist = 0;
+      let bestLineIdx = 0;
+      let bestStart = trial.lines[0]?.points[0] || { x: minX, y: minY };
+      let bestEnd = trial.lines[0]?.points[trial.lines[0].points.length - 1] || { x: minX, y: minY };
+
+      trial.lines.forEach((line, lIdx) => {
+        if (!line.points || line.points.length < 2) return;
+        const pS = line.points[0];
+        const pE = line.points[line.points.length - 1];
+        let os = 0;
+
+        switch (overrideZoneId) {
+          case 'TR_H': case 'BR_H':
+            os = Math.max(0, pE.x - maxX); break;
+          case 'TL_H': case 'BL_H':
+            os = Math.max(0, minX - pE.x); break;
+          case 'TR_V': case 'TL_V':
+            os = Math.max(0, minY - pE.y); break;
+          case 'BR_V': case 'BL_V':
+            os = Math.max(0, pE.y - maxY); break;
+        }
+
+        if (os >= bestDist) {
+          bestDist = os;
+          bestLineIdx = lIdx;
+          bestStart = pS;
+          bestEnd = pE;
+        }
+      });
+
+      bestExit = {
+        lineIndex: bestLineIdx,
+        startPoint: bestStart,
+        endPoint: bestEnd,
+        activeZoneId: overrideZoneId,
+        overshootPx: bestDist
+      };
+    }
+  } else {
+    if (candidateExits.length === 0) {
+      return defaultNoExit;
+    }
+    // Pick candidate with greatest overshoot (primary apex probe)
+    candidateExits.sort((a, b) => b.overshootPx - a.overshootPx);
+    bestExit = candidateExits[0];
+  }
+
+  if (!bestExit) {
+    return defaultNoExit;
+  }
+
+  const overshootPx = Math.round(bestExit.overshootPx);
+  let deltaL = Math.round(overshootPx - idealStep);
+  let absDeltaL = Math.abs(deltaL);
+
+  let status: 'hit' | 'undershoot' | 'overshoot' | 'inside' = 'inside';
+
+  // Option 1: Solve Override (solving the task overrides apex error to 0)
+  if (isSolvedTrial && solveOverride) {
+    absDeltaL = 0;
+    deltaL = 0;
+    status = 'hit';
+  } else {
+    // Option 3: Cap Max Error at baseline step (a large exploratory probe is not penalized more than non-exit)
+    if (capMaxError && absDeltaL > idealStep) {
+      absDeltaL = idealStep;
+    }
+
+    if (absDeltaL <= tolerance) {
+      status = 'hit';
+    } else if (deltaL < -tolerance) {
+      status = 'undershoot';
+    } else {
+      status = 'overshoot';
+    }
+  }
+
+  const zoneDef = TARGET_ZONES_DEF.find(z => z.id === bestExit!.activeZoneId);
+
+  return {
+    hasExit: true,
+    activeZoneId: bestExit.activeZoneId,
+    activeZoneName: zoneDef ? zoneDef.name : bestExit.activeZoneId,
+    turnPoint: bestExit.endPoint,
+    startPoint: bestExit.startPoint,
+    overshootPx,
+    deltaL,
+    absDeltaL,
+    status
+  };
+};

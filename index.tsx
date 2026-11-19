@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { createRoot } from 'react-dom/client';
+import './src/index.css';
 import { 
   Upload, FileDown, RefreshCcw, FileText, Activity, Map as MapIcon, ChevronRight, BarChart3, 
   AlertCircle, Maximize2, Info, Target, Filter, X, LayoutGrid, Scissors, Zap, Flag, Trash2, 
@@ -10,20 +11,21 @@ import {
 } from 'lucide-react';
 
 import {
-  Point, LineSegment, ProcessedTrial, GridNode, Calibration, SubjectData, HeatPoint, HeatLine, AnalysisMode
+  Point, LineSegment, ProcessedTrial, GridNode, Calibration, SubjectData, HeatPoint, HeatLine, AnalysisMode, ApexTargetConfig
 } from './src/types';
 import {
   CANVAS_SIZE, DOT_RADIUS, ANGLE_THRESHOLD_SPLIT, MIN_LINE_LENGTH, LOOKAHEAD_MIN_LENGTH,
   SMOOTHING_WINDOW, smoothPoints, getAngle, calculateDistance, distToSegment, classifyLine,
-  performSegmentation, recalculateLineNodes, calibrateTrial
+  performSegmentation, recalculateLineNodes, calibrateTrial, extractTrialApexOvershoot
 } from './src/geometry';
 import {
   parseNum, detectDelimiter, decodeBuffer, processCSV
 } from './src/parser';
 import {
-  generateFilteredCSV, generateAllDataCSV, generateStatsCSV, generateKinematicsCSV, generateDuplexFullCSV
+  generateFilteredCSV, generateAllDataCSV, generateStatsCSV, generateKinematicsCSV, generateDuplexFullCSV, exportExcelWorkbook
 } from './src/stats';
 import { KinematicsVelocityGraph } from './src/components/KinematicsVelocityGraph';
+import { ProbingConvergenceGraph } from './src/components/ProbingConvergenceGraph';
 
 
 const GlobalHeatMap: React.FC<{ 
@@ -35,6 +37,7 @@ const GlobalHeatMap: React.FC<{
   color?: 'blue' | 'emerald' | 'amber';
 }> = ({ title, icon, points, normalizedNodes, badge, color = 'blue' }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+
   const [zoom, setZoom] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
@@ -449,6 +452,190 @@ const App: React.FC = () => {
   const [manualOverrides, setManualOverrides] = useState<Set<string>>(new Set());
   const [excludedLines, setExcludedLines] = useState<Set<string>>(new Set());
   const [excludedSubjects, setExcludedSubjects] = useState<Set<string>>(new Set());
+  const [excludedTrials, setExcludedTrials] = useState<Set<string>>(new Set());
+  const [globalBoxPadding, setGlobalBoxPadding] = useState<number>(15.0);
+  const [subjectApexConfigs, setSubjectApexConfigs] = useState<Record<string, ApexTargetConfig>>({});
+  const [manualZoneOverrides, setManualZoneOverrides] = useState<Record<string, TargetZoneId>>({});
+
+  const getApexConfig = useCallback((subId: string): ApexTargetConfig => {
+    return subjectApexConfigs[subId] || {
+      idealOvershoot: 116.0,
+      toleranceMargin: 65.0,
+      isAutoAligned: false,
+      solveOverride: false,
+      capMaxError: false
+    };
+  }, [subjectApexConfigs]);
+
+  const updateApexConfig = useCallback((subId: string, updates: Partial<ApexTargetConfig>) => {
+    setSubjectApexConfigs(prev => ({
+      ...prev,
+      [subId]: {
+        ...(prev[subId] || {
+          idealOvershoot: 116.0,
+          toleranceMargin: 65.0,
+          isAutoAligned: false,
+          solveOverride: false,
+          capMaxError: false
+        }),
+        ...updates
+      }
+    }));
+  }, []);
+
+  const handleResetApexConfig = useCallback((subId: string) => {
+    setSubjectApexConfigs(prev => ({
+      ...prev,
+      [subId]: {
+        idealOvershoot: 116.0,
+        toleranceMargin: 65.0,
+        isAutoAligned: false,
+        alignedTrialId: undefined,
+        solveOverride: false,
+        capMaxError: false
+      }
+    }));
+    showToast('Параметры целевой зоны сброшены к базовым (116 px / ±65 px)', 'info');
+  }, []);
+
+  const handleAutoAlignApex = useCallback((subId: string) => {
+    const sub = subjects.find(s => s.id === subId);
+    if (!sub || !sub.isSolved) {
+      showToast('Автокоррекция доступна только для успешных решателей. Сначала отметьте испытуемого как решившего задачу (трофей 🏆)', 'error');
+      return;
+    }
+    const subTrials = processedData.filter(t => t.subjectId === subId && !excludedTrials.has(`${subId}-${t.trialId}`));
+    if (subTrials.length === 0) return;
+
+    // Last trial of successful solver is the solution trial
+    const lastTrial = subTrials[subTrials.length - 1];
+    const apexRes = extractTrialApexOvershoot(lastTrial, sub.nodes, {
+      idealStep: 116,
+      tolerance: 65,
+      boxPadding: globalBoxPadding
+    });
+
+    let solutionOvershoot = 116;
+    let alignedTrialId = lastTrial.trialId;
+
+    if (apexRes.hasExit && apexRes.overshootPx > 10) {
+      solutionOvershoot = Math.round(apexRes.overshootPx);
+    } else {
+      // Find candidate trial with maximum exit
+      let maxExit = 0;
+      let bestTrial = lastTrial;
+      subTrials.forEach(t => {
+        const res = extractTrialApexOvershoot(t, sub.nodes, {
+          idealStep: 116,
+          tolerance: 65,
+          boxPadding: globalBoxPadding
+        });
+        if (res.hasExit && res.overshootPx > maxExit) {
+          maxExit = res.overshootPx;
+          bestTrial = t;
+        }
+      });
+      if (maxExit > 10) {
+        solutionOvershoot = Math.round(maxExit);
+        alignedTrialId = bestTrial.trialId;
+      }
+    }
+
+    updateApexConfig(subId, {
+      idealOvershoot: solutionOvershoot,
+      isAutoAligned: true,
+      alignedTrialId
+    });
+    showToast(`Целевая зона выровнена по финальному решению: ${solutionOvershoot} px`, 'success');
+  }, [subjects, processedData, excludedTrials, updateApexConfig, globalBoxPadding]);
+
+  const handleBatchAutoAlignAllSolvers = useCallback(() => {
+    const solvedSubs = subjects.filter(s => s.isSolved);
+    if (solvedSubs.length === 0) {
+      showToast('Нет участников со статусом "Решено" (трофей 🏆) для автокоррекции', 'info');
+      return;
+    }
+
+    const newConfigs: Record<string, ApexTargetConfig> = {};
+    let alignedCount = 0;
+
+    solvedSubs.forEach(sub => {
+      const subTrials = processedData.filter(t => t.subjectId === sub.id && !excludedTrials.has(`${sub.id}-${t.trialId}`));
+      if (subTrials.length === 0) return;
+
+      const lastTrial = subTrials[subTrials.length - 1];
+      const apexRes = extractTrialApexOvershoot(lastTrial, sub.nodes, {
+        idealStep: 116,
+        tolerance: 65,
+        boxPadding: globalBoxPadding
+      });
+
+      let solutionOvershoot = 116;
+      let alignedTrialId = lastTrial.trialId;
+
+      if (apexRes.hasExit && apexRes.overshootPx > 10) {
+        solutionOvershoot = Math.round(apexRes.overshootPx);
+      } else {
+        let maxExit = 0;
+        let bestTrial = lastTrial;
+        subTrials.forEach(t => {
+          const res = extractTrialApexOvershoot(t, sub.nodes, {
+            idealStep: 116,
+            tolerance: 65,
+            boxPadding: globalBoxPadding
+          });
+          if (res.hasExit && res.overshootPx > maxExit) {
+            maxExit = res.overshootPx;
+            bestTrial = t;
+          }
+        });
+        if (maxExit > 10) {
+          solutionOvershoot = Math.round(maxExit);
+          alignedTrialId = bestTrial.trialId;
+        }
+      }
+
+      const existingCfg = subjectApexConfigs[sub.id] || sub.apexConfig;
+      newConfigs[sub.id] = {
+        idealOvershoot: solutionOvershoot,
+        toleranceMargin: existingCfg?.toleranceMargin ?? 65.0,
+        boxPadding: globalBoxPadding,
+        isAutoAligned: true,
+        alignedTrialId,
+        solveOverride: existingCfg?.solveOverride ?? false,
+        capMaxError: existingCfg?.capMaxError ?? false
+      };
+      alignedCount++;
+    });
+
+    setSubjectApexConfigs(prev => ({ ...prev, ...newConfigs }));
+    showToast(`⚡ Автокоррекция целевых зон выполнена для всех ${alignedCount} решивших!`, 'success');
+    addLog(`Автокоррекция целевых зон выполнена для ${alignedCount} решивших участников.`);
+  }, [subjects, processedData, excludedTrials, globalBoxPadding, subjectApexConfigs]);
+  const [activeTab, setActiveTab] = useState<'analysis' | 'geometry' | 'heatmaps' | 'reports'>('analysis');
+  const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'error' | 'info' } | null>(null);
+
+  const showToast = (text: string, type: 'success' | 'error' | 'info' = 'success') => {
+    setToastMessage({ text, type });
+    setTimeout(() => {
+      setToastMessage(prev => prev?.text === text ? null : prev);
+    }, 3500);
+  };
+
+  const toggleTrialExclusion = (subjectId: string, trialId: string | number) => {
+    const key = `${subjectId}-${trialId}`;
+    setExcludedTrials(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) {
+        next.delete(key);
+        showToast(`Проба #${trialId} возвращена в анализ`);
+      } else {
+        next.add(key);
+        showToast(`Проба #${trialId} исключена из анализа`, 'info');
+      }
+      return next;
+    });
+  };
   const [subjectGroups, setSubjectGroups] = useState<Record<string, string>>({});
   const [selectedTrialId, setSelectedTrialId] = useState<string | number | null>(null);
   const [hoveredTrialId, setHoveredTrialId] = useState<string | number | null>(null);
@@ -477,6 +664,27 @@ const App: React.FC = () => {
   const requestRef = useRef<number>(null);
 
   const activeSubject = useMemo(() => subjects.find(s => s.id === activeSubjectId), [subjects, activeSubjectId]);
+
+  const activeSubjectTrials = useMemo(() => {
+    if (!activeSubjectId) return [];
+    return processedData.filter(t => t.subjectId === activeSubjectId);
+  }, [processedData, activeSubjectId]);
+
+  // Wheel zoom with native event listener to strictly prevent page scroll
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const handleWheelNative = (e: WheelEvent) => {
+      e.preventDefault();
+      const delta = e.deltaY < 0 ? 1.15 : 0.85;
+      setAutoFit(false);
+      setZoom(z => Math.max(0.15, Math.min(5, +(z * delta).toFixed(2))));
+    };
+    canvas.addEventListener('wheel', handleWheelNative, { passive: false });
+    return () => {
+      canvas.removeEventListener('wheel', handleWheelNative);
+    };
+  }, [activeTab, activeSubjectId]);
   
   const activeNodes = useMemo(() => {
     if (!activeSubject) return [];
@@ -928,10 +1136,67 @@ const App: React.FC = () => {
         offsetX: activeSubject.calibration.offsetX, 
         offsetY: activeSubject.calibration.offsetY 
       });
-    } else {
-      setIsPanning(true);
-      setPanStart({ x: e.clientX - panOffset.x, y: e.clientY - panOffset.y });
+      return;
     }
+
+    // Check hit-testing on the 8 target zone circles for manual researcher override
+    if (activeNodes.length >= 9) {
+      const xs = activeNodes.map(n => n.x);
+      const ys = activeNodes.map(n => n.y);
+      const rawMinX = Math.min(...xs);
+      const rawMaxX = Math.max(...xs);
+      const rawMinY = Math.min(...ys);
+      const rawMaxY = Math.max(...ys);
+
+      const currentApexCfg = getApexConfig(activeSubject.id);
+      const step = currentApexCfg ? currentApexCfg.idealOvershoot : (activeCellSize.w || 116);
+      const tolRadius = currentApexCfg ? currentApexCfg.toleranceMargin : 65;
+      const boxPad = globalBoxPadding;
+
+      const minX = rawMinX - boxPad;
+      const maxX = rawMaxX + boxPad;
+      const minY = rawMinY - boxPad;
+      const maxY = rawMaxY + boxPad;
+
+      const targetZones = [
+        { id: 'TR_H' as TargetZoneId, name: 'Справа-сверху (гор.)', x: maxX + step, y: rawMinY },
+        { id: 'TR_V' as TargetZoneId, name: 'Сверху-справа (верт.)', x: rawMaxX, y: minY - step },
+        { id: 'BR_H' as TargetZoneId, name: 'Справа-снизу (гор.)', x: maxX + step, y: rawMaxY },
+        { id: 'BR_V' as TargetZoneId, name: 'Снизу-справа (верт.)', x: rawMaxX, y: maxY + step },
+        { id: 'BL_H' as TargetZoneId, name: 'Слева-снизу (гор.)', x: minX - step, y: rawMaxY },
+        { id: 'BL_V' as TargetZoneId, name: 'Снизу-слева (верт.)', x: rawMinX, y: maxY + step },
+        { id: 'TL_H' as TargetZoneId, name: 'Слева-сверху (гор.)', x: minX - step, y: rawMinY },
+        { id: 'TL_V' as TargetZoneId, name: 'Сверху-слева (верт.)', x: rawMinX, y: minY - step }
+      ];
+
+      const clickedZone = targetZones.find(z => Math.hypot(x - z.x, y - z.y) <= (tolRadius + 10));
+
+      if (clickedZone) {
+        const effectiveTrialId = selectedTrialId !== null ? selectedTrialId : activeSubjectTrials[activeSubjectTrials.length - 1]?.trialId;
+        if (effectiveTrialId !== undefined) {
+          const trialKey = `${activeSubject.id}-${effectiveTrialId}`;
+          const isAlreadyOverridden = manualZoneOverrides[trialKey] === clickedZone.id;
+
+          setManualZoneOverrides(prev => {
+            const next = { ...prev };
+            if (isAlreadyOverridden) {
+              delete next[trialKey];
+              showToast(`Сброшен ручной выбор: включено автоопределение для пробы #${effectiveTrialId}`, 'info');
+              addLog(`Сброшен ручной выбор зоны для пробы #${effectiveTrialId}.`);
+            } else {
+              next[trialKey] = clickedZone.id;
+              showToast(`🎯 Зона для пробы #${effectiveTrialId} зафиксирована вручную: ${clickedZone.name}`, 'success');
+              addLog(`Целевая зона для пробы #${effectiveTrialId} зафиксирована вручную: ${clickedZone.name}.`);
+            }
+            return next;
+          });
+          return; // Consumed click as manual zone override, do not start canvas pan
+        }
+      }
+    }
+
+    setIsPanning(true);
+    setPanStart({ x: e.clientX - panOffset.x, y: e.clientY - panOffset.y });
   };
 
   const handleMainCanvasMouseMove = (e: React.MouseEvent) => {
@@ -1153,9 +1418,20 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const ctx = canvasRef.current?.getContext('2d');
-    if (!ctx || activeNodes.length === 0) return;
+    if (!ctx) return;
 
-    ctx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+    // Fill soft light-grey background (gentle on eyes, high contrast)
+    ctx.fillStyle = '#eef2f6';
+    ctx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+
+    if (activeNodes.length === 0) {
+      ctx.fillStyle = '#64748b';
+      ctx.font = 'bold 15px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('Загрузите CSV файлы для отображения решения «9 точек»', CANVAS_SIZE / 2, CANVAS_SIZE / 2);
+      return;
+    }
+
     ctx.save();
     
     const viewScale = currentScale;
@@ -1194,6 +1470,128 @@ const App: React.FC = () => {
         ctx.fill();
       });
       ctx.globalCompositeOperation = 'source-over';
+    }
+
+    // 8 Canonical 4-corner turn zones (116px step outside 9 dots)
+    if (activeNodes.length >= 9) {
+      const xs = activeNodes.map(n => n.x);
+      const ys = activeNodes.map(n => n.y);
+      const rawMinX = Math.min(...xs);
+      const rawMaxX = Math.max(...xs);
+      const rawMinY = Math.min(...ys);
+      const rawMaxY = Math.max(...ys);
+
+      const currentApexCfg = activeSubject ? getApexConfig(activeSubject.id) : null;
+      const step = currentApexCfg ? currentApexCfg.idealOvershoot : (activeCellSize.w || 116);
+      const tolRadius = currentApexCfg ? currentApexCfg.toleranceMargin : 45;
+      const boxPad = globalBoxPadding;
+
+      const minX = rawMinX - boxPad;
+      const maxX = rawMaxX + boxPad;
+      const minY = rawMinY - boxPad;
+      const maxY = rawMaxY + boxPad;
+
+      const targetZones = [
+        { id: 'TR_H', name: 'Справа-сверху (гор.)', x: maxX + step, y: rawMinY },
+        { id: 'TR_V', name: 'Сверху-справа (верт.)', x: rawMaxX, y: minY - step },
+        { id: 'BR_H', name: 'Справа-снизу (гор.)', x: maxX + step, y: rawMaxY },
+        { id: 'BR_V', name: 'Снизу-справа (верт.)', x: rawMaxX, y: maxY + step },
+        { id: 'BL_H', name: 'Слева-снизу (гор.)', x: minX - step, y: rawMaxY },
+        { id: 'BL_V', name: 'Снизу-слева (верт.)', x: rawMinX, y: maxY + step },
+        { id: 'TL_H', name: 'Слева-сверху (гор.)', x: minX - step, y: rawMinY },
+        { id: 'TL_V', name: 'Сверху-слева (верт.)', x: rawMinX, y: minY - step }
+      ];
+
+      // Draw bounding perceptual box
+      ctx.save();
+      ctx.strokeStyle = 'rgba(245, 158, 11, 0.6)';
+      ctx.lineWidth = 2 / viewScale;
+      ctx.setLineDash([6 / viewScale, 4 / viewScale]);
+      ctx.strokeRect(minX, minY, maxX - minX, maxY - minY);
+
+      // Determine active zone for selected trial (supports manual researcher override)
+      const isSolutionTrial = selectedTrial && activeSubject && activeSubject.isSolved && 
+        (selectedTrial.trialId === activeSubjectTrials[activeSubjectTrials.length - 1]?.trialId);
+
+      const trialKey = selectedTrial && activeSubject ? `${activeSubject.id}-${selectedTrial.trialId}` : '';
+      const manualOverrideZone = trialKey ? manualZoneOverrides[trialKey] : null;
+
+      const apexRes = selectedTrial ? extractTrialApexOvershoot(selectedTrial, activeNodes, {
+        idealStep: step,
+        tolerance: tolRadius,
+        boxPadding: boxPad,
+        isSolvedTrial: isSolutionTrial,
+        solveOverride: !!currentApexCfg?.solveOverride,
+        capMaxError: !!currentApexCfg?.capMaxError,
+        overrideZoneId: manualOverrideZone || null
+      }) : null;
+
+      const activeZoneId = apexRes && apexRes.hasExit ? apexRes.activeZoneId : null;
+      const isManualZone = !!manualOverrideZone;
+
+      // Draw all 8 zones
+      targetZones.forEach(z => {
+        const isActive = z.id === activeZoneId;
+        ctx.beginPath();
+        ctx.arc(z.x, z.y, tolRadius / viewScale, 0, Math.PI * 2);
+
+        if (isActive) {
+          if (isManualZone) {
+            ctx.fillStyle = 'rgba(234, 179, 8, 0.25)'; // Amber highlight for manual override
+            ctx.fill();
+            ctx.strokeStyle = '#eab308'; // amber-500
+            ctx.lineWidth = 3 / viewScale;
+            ctx.setLineDash([]);
+            ctx.stroke();
+
+            ctx.fillStyle = '#ca8a04';
+            ctx.font = `bold ${9 / viewScale}px sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.fillText(`🎯 ВРУЧНУЮ: ${z.name.toUpperCase()} (кликните для сброса)`, z.x, z.y - ((tolRadius + 5) / viewScale));
+            if (apexRes) {
+              ctx.fillStyle = '#a16207';
+              ctx.font = `bold ${8 / viewScale}px monospace`;
+              ctx.fillText(`L_вылет: ${apexRes.overshootPx} px (ΔL: ${apexRes.deltaL > 0 ? '+' : ''}${apexRes.deltaL} px)`, z.x, z.y + ((tolRadius + 13) / viewScale));
+            }
+          } else {
+            ctx.fillStyle = 'rgba(16, 185, 129, 0.22)';
+            ctx.fill();
+            ctx.strokeStyle = '#10b981';
+            ctx.lineWidth = 2.5 / viewScale;
+            ctx.setLineDash([]);
+            ctx.stroke();
+
+            ctx.fillStyle = '#059669';
+            ctx.font = `bold ${9 / viewScale}px sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.fillText(`🎯 ЦЕЛЕВАЯ ЗОНА: ${z.name.toUpperCase()} (${Math.round(step)}px, ±${Math.round(tolRadius)}px)`, z.x, z.y - ((tolRadius + 5) / viewScale));
+            if (apexRes) {
+              ctx.fillStyle = '#047857';
+              ctx.font = `bold ${8 / viewScale}px monospace`;
+              ctx.fillText(`L_вылет: ${apexRes.overshootPx} px (ΔL: ${apexRes.deltaL > 0 ? '+' : ''}${apexRes.deltaL} px)`, z.x, z.y + ((tolRadius + 13) / viewScale));
+            }
+          }
+
+          // Draw guide line from apex turn point to target zone
+          if (apexRes && apexRes.turnPoint) {
+            ctx.beginPath();
+            ctx.moveTo(apexRes.turnPoint.x, apexRes.turnPoint.y);
+            ctx.lineTo(z.x, z.y);
+            ctx.strokeStyle = isManualZone ? 'rgba(234, 179, 8, 0.7)' : 'rgba(16, 185, 129, 0.6)';
+            ctx.lineWidth = 1.5 / viewScale;
+            ctx.setLineDash([4 / viewScale, 3 / viewScale]);
+            ctx.stroke();
+          }
+        } else {
+          ctx.fillStyle = 'rgba(16, 185, 129, 0.04)';
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(16, 185, 129, 0.35)';
+          ctx.lineWidth = 1 / viewScale;
+          ctx.setLineDash([4 / viewScale, 3 / viewScale]);
+          ctx.stroke();
+        }
+      });
+      ctx.restore();
     }
 
     activeNodes.forEach(node => {
@@ -1245,11 +1643,14 @@ const App: React.FC = () => {
       const nodeW = (node.w || DOT_RADIUS * 2) / viewScale;
       const nodeH = (node.h || DOT_RADIUS * 2) / viewScale;
       ctx.ellipse(node.x, node.y, nodeW / 2, nodeH / 2, 0, 0, Math.PI * 2);
-      ctx.fillStyle = isCalibrating ? '#f97316' : '#1e293b';
+      ctx.fillStyle = isCalibrating ? '#f97316' : '#0f172a';
       ctx.shadowBlur = isCalibrating ? 15 * pulse : 0;
       ctx.shadowColor = '#f97316';
       ctx.fill();
       ctx.shadowBlur = 0;
+      ctx.strokeStyle = isCalibrating ? '#ea580c' : '#334155';
+      ctx.lineWidth = 1.5 / viewScale;
+      ctx.stroke();
       
       if (isCalibrating) {
         ctx.fillStyle = 'white';
@@ -1591,6 +1992,33 @@ const App: React.FC = () => {
     addLog("Экспортирован полный дуплексный отчет (Геометрия + Кинематика).");
   };
 
+  const handleExportExcel = async () => {
+    if (subjects.length === 0) {
+      showToast('Нет данных испытуемых для экспорта в Excel', 'error');
+      return;
+    }
+    try {
+      exportExcelWorkbook(
+        subjects,
+        processedData,
+        manualOverrides,
+        excludedLines,
+        subjectGroups,
+        excludedSubjects,
+        excludedTrials,
+        subjectApexConfigs,
+        globalBoxPadding,
+        manualZoneOverrides
+      );
+      showToast('Сводная статистика успешно экспортирована в Excel (.xlsx: 2 листа)', 'success');
+      addLog("Экспортирована сводная статистика в Excel (.xlsx).");
+    } catch (err: any) {
+      console.error('Excel export error:', err);
+      showToast(`Ошибка экспорта Excel: ${err?.message || err}`, 'error');
+      addLog(`Ошибка экспорта Excel: ${err?.message || err}`);
+    }
+  };
+
   const exportCSV = () => {
     const csvContent = generateFilteredCSV(filteredTrials, subjects, manualOverrides, subjectGroups);
     const blob = new Blob([csvContent], { type: 'text/csv' });
@@ -1612,7 +2040,7 @@ const App: React.FC = () => {
   };
 
   const exportStatsCSV = () => {
-    const csvContent = generateStatsCSV(subjects, processedData, manualOverrides, excludedLines, subjectGroups, excludedSubjects);
+    const csvContent = generateStatsCSV(subjects, processedData, manualOverrides, excludedLines, subjectGroups, excludedSubjects, excludedTrials, subjectApexConfigs, globalBoxPadding, manualZoneOverrides);
     const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
@@ -1622,22 +2050,61 @@ const App: React.FC = () => {
   };
 
   const exportSession = () => {
-    const sessionData = {
-      subjects,
-      processedData,
-      manualOverrides: Array.from(manualOverrides),
-      excludedLines: Array.from(excludedLines),
-      subjectGroups,
-      angleThreshold,
-      minLineLength,
-      usePhasedMode
-    };
-    const blob = new Blob([JSON.stringify(sessionData, null, 2)], { type: 'application/json' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = `session_backup_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.json`;
-    link.click();
-    addLog("Сессия экспортирована в JSON.");
+    if (subjects.length === 0) {
+      showToast('Нет данных для сохранения в сессию', 'error');
+      return;
+    }
+    try {
+      // Clean large 1ms high-frequency interpolation arrays from kinematics
+      // to keep session JSON lightweight (< 2MB) and prevent browser string allocation overflow
+      const cleanProcessedData = processedData.map(t => {
+        const { kinematics, ...rest } = t;
+        const cleanKinematics = kinematics ? {
+          metrics: kinematics.metrics,
+          peaks: kinematics.peaks,
+          pauses: kinematics.pauses,
+          segments: kinematics.segments
+        } : undefined;
+        return {
+          ...rest,
+          kinematics: cleanKinematics
+        };
+      });
+
+      const sessionData = {
+        subjects,
+        processedData: cleanProcessedData,
+        manualOverrides: Array.from(manualOverrides),
+        excludedLines: Array.from(excludedLines),
+        excludedSubjects: Array.from(excludedSubjects),
+        excludedTrials: Array.from(excludedTrials),
+        activeSubjectId,
+        analysisMode,
+        subjectGroups,
+        angleThreshold,
+        minLineLength,
+        usePhasedMode,
+        subjectApexConfigs,
+        globalBoxPadding,
+        manualZoneOverrides
+      };
+
+      const jsonStr = JSON.stringify(sessionData);
+      const blob = new Blob([jsonStr], { type: 'application/json' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = `session_backup_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.json`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+      showToast('Сессия успешно сохранена в JSON', 'success');
+      addLog("Сессия экспортирована в JSON.");
+    } catch (err: any) {
+      console.error('Session export error:', err);
+      showToast(`Ошибка сохранения сессии JSON: ${err?.message || err}`, 'error');
+      addLog(`Ошибка экспорта JSON: ${err?.message || err}`);
+    }
   };
 
   const importSession = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1649,24 +2116,44 @@ const App: React.FC = () => {
       // Try parsing as JSON first (Session Backup)
       if (file.name.toLowerCase().endsWith('.json')) {
         const data = JSON.parse(text);
-        if (data.subjects) setSubjects(data.subjects);
-        if (data.processedData) setProcessedData(data.processedData);
+        const importedSubjects: SubjectData[] = data.subjects || [];
+        const importedAngle = data.angleThreshold || ANGLE_THRESHOLD_SPLIT;
+        const importedMinLen = data.minLineLength || MIN_LINE_LENGTH;
+
+        if (data.subjects) setSubjects(importedSubjects);
+
+        if (data.processedData) {
+          // Rehydrate trials with calibration and high-resolution kinematics
+          const rehydrated = (data.processedData as ProcessedTrial[]).map(t => {
+            const sub = importedSubjects.find(s => s.id === t.subjectId);
+            if (!sub) return t;
+            return calibrateTrial(t, sub.calibration, sub.nodes, importedAngle, importedMinLen);
+          });
+          setProcessedData(rehydrated);
+        }
+
         if (data.manualOverrides) setManualOverrides(new Set(data.manualOverrides));
         if (data.excludedLines) setExcludedLines(new Set(data.excludedLines));
         if (data.subjectGroups) setSubjectGroups(data.subjectGroups);
-        if (data.angleThreshold) setAngleThreshold(data.angleThreshold);
-        if (data.minLineLength) setMinLineLength(data.minLineLength);
+        if (data.angleThreshold) setAngleThreshold(importedAngle);
+        if (data.minLineLength) setMinLineLength(importedMinLen);
         if (data.usePhasedMode !== undefined) setUsePhasedMode(data.usePhasedMode);
+        if (data.excludedSubjects) setExcludedSubjects(new Set(data.excludedSubjects));
+        if (data.excludedTrials) setExcludedTrials(new Set(data.excludedTrials));
+        if (data.activeSubjectId) setActiveSubjectId(data.activeSubjectId);
+        if (data.analysisMode) setAnalysisMode(data.analysisMode);
+        if (data.subjectApexConfigs) setSubjectApexConfigs(data.subjectApexConfigs);
+        if (data.globalBoxPadding !== undefined) setGlobalBoxPadding(data.globalBoxPadding);
+        if (data.manualZoneOverrides) setManualZoneOverrides(data.manualZoneOverrides);
+        showToast('Сессия успешно загружена из JSON', 'success');
         addLog("Сессия успешно восстановлена из JSON.");
       } else {
-        // Fallback or handle CSV like before if it's the same handler
-        // But I will keep separate for clarity if possible.
-        // The user button currently calls handleCalibrationFileUpload.
         addLog("Для восстановления сессии используйте .json файл резервной копии.");
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
       setError("Ошибка при импорте сессии.");
+      showToast(`Ошибка импорта сессии: ${err?.message || err}`, 'error');
       addLog("Ошибка: Не удалось прочитать файл сессии.");
     }
     e.target.value = "";
@@ -1684,6 +2171,7 @@ const App: React.FC = () => {
     setActiveSubjectId(null);
     resetFilters();
     setManualOverrides(new Set());
+    setManualZoneOverrides({});
     setSelectedTrialId(null);
     setHoveredTrialId(null);
     setIsCalibrating(false);
@@ -1691,844 +2179,1010 @@ const App: React.FC = () => {
     setShowFinishHeatmap(false);
   };
 
+  const [subjectSearch, setSubjectSearch] = useState('');
+
+  const filteredSubjects = useMemo(() => {
+    if (!subjectSearch.trim()) return subjects;
+    const q = subjectSearch.toLowerCase();
+    return subjects.filter(s =>
+      s.id.toLowerCase().includes(q) ||
+      `${s.lastName || ''} ${s.firstName || ''}`.toLowerCase().includes(q) ||
+      (subjectGroups[s.id] && subjectGroups[s.id].toLowerCase().includes(q))
+    );
+  }, [subjects, subjectSearch, subjectGroups]);
+
+  const solvedCount = useMemo(() => {
+    return subjects.filter(s => s.isSolved).length;
+  }, [subjects]);
+
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 p-4 md:p-8 font-sans">
-      <header className="max-w-[1720px] w-full mx-auto mb-8 flex flex-col xl:flex-row justify-between items-center gap-4">
-        <div className="flex items-center gap-4">
-          <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-blue-600 via-indigo-600 to-amber-500 flex items-center justify-center text-white shadow-lg shadow-indigo-100">
-            <Activity size={28} />
+    <div className="h-screen w-full flex flex-col bg-slate-950 text-slate-100 overflow-hidden font-sans select-none">
+      {/* ================= TOP COMPACT NAVBAR ================= */}
+      <header className="h-14 bg-slate-900 border-b border-slate-800 px-5 flex items-center justify-between shrink-0 text-white z-20">
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-indigo-600 via-indigo-500 to-violet-500 flex items-center justify-center font-black text-white text-sm shadow-lg shadow-indigo-500/30">
+            M
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <h1 className="text-3xl font-black text-slate-900 tracking-tighter">
-                M.O.G.N.U.
-              </h1>
-              <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 uppercase tracking-widest border border-indigo-200">
-                SIGMA 2.0 EVO
+              <span className="font-black text-sm tracking-tight text-white">M.O.G.N.U.</span>
+              <span className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                2.0 EVO
               </span>
             </div>
-            <p className="text-slate-500 font-bold text-xs">Motor Optimization, Geometry & Nine-dot Unifier</p>
+            <div className="text-[10px] text-slate-400 font-medium hidden sm:block">
+              Анализатор кинематики & геометрии «9 точек»
+            </div>
           </div>
         </div>
 
         {/* 3 Analysis Modes Selector */}
-        <div className="flex items-center bg-slate-200/80 p-1.5 rounded-2xl gap-1 shadow-inner border border-slate-200">
-          <button 
-            onClick={() => setAnalysisMode('kinematics')} 
-            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black transition-all ${
-              analysisMode === 'kinematics' 
-                ? 'bg-amber-500 text-white shadow-md shadow-amber-200' 
-                : 'text-slate-600 hover:bg-white/60'
+        <div className="flex items-center bg-slate-800/80 p-1 rounded-xl border border-slate-700/60 gap-1">
+          <button
+            onClick={() => setAnalysisMode('kinematics')}
+            className={`px-3 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
+              analysisMode === 'kinematics'
+                ? 'bg-amber-500 text-white shadow-md shadow-amber-500/30 font-black'
+                : 'text-slate-400 hover:text-white'
             }`}
             title="Режим кинематики: профили скорости V(t), паузы, пики, выходы за рамку"
           >
-            <Zap size={15} /> ⚡ Кинематика
+            <Zap size={14} /> <span>Кинематика</span>
           </button>
-          <button 
-            onClick={() => setAnalysisMode('geometry')} 
-            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black transition-all ${
-              analysisMode === 'geometry' 
-                ? 'bg-blue-600 text-white shadow-md shadow-blue-200' 
-                : 'text-slate-600 hover:bg-white/60'
+          <button
+            onClick={() => setAnalysisMode('geometry')}
+            className={`px-3 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
+              analysisMode === 'geometry'
+                ? 'bg-blue-600 text-white shadow-md shadow-blue-500/30 font-black'
+                : 'text-slate-400 hover:text-white'
             }`}
             title="Классическая СИГМА: 9 узлов, типы линий, фазы решения"
           >
-            <Ruler size={15} /> 📐 Геометрия
+            <Ruler size={14} /> <span>Геометрия</span>
           </button>
-          <button 
-            onClick={() => setAnalysisMode('duplex')} 
-            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-black transition-all ${
-              analysisMode === 'duplex' 
-                ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-md shadow-indigo-200' 
-                : 'text-slate-600 hover:bg-white/60'
+          <button
+            onClick={() => setAnalysisMode('duplex')}
+            className={`px-3 py-1 rounded-lg text-xs font-black transition-all flex items-center gap-1.5 ${
+              analysisMode === 'duplex'
+                ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
+                : 'text-slate-400 hover:text-white'
             }`}
             title="Дуплексный режим: одновременно кинематический и геометрический анализ"
           >
-            <Layers size={15} /> 🚀 MOGNУ Дуплекс
+            <Layers size={14} /> <span>MOGNУ Дуплекс</span>
           </button>
         </div>
 
-        {processedData.length > 0 || subjects.length > 0 ? (
-          <div className="flex gap-2 flex-wrap justify-center">
-            <button 
-              onClick={handleAutoCenter}
-              disabled={!activeSubject}
-              className="p-2.5 border rounded-xl transition-all bg-white border-slate-200 text-orange-600 hover:bg-orange-50 shadow-sm disabled:opacity-40"
-              title="🎯 Быстрая авто-подгонка рисунка к 9 точкам"
+        {/* Action Buttons */}
+        <div className="flex items-center gap-2">
+          {/* Excel Export Button */}
+          <button
+            onClick={handleExportExcel}
+            disabled={subjects.length === 0}
+            className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-sm shadow-emerald-600/30 transition-all"
+            title="Экспорт сводной статистики в Excel (.xlsx: Лист 1 'Общая статистика' + Лист 2 'По этапам')"
+          >
+            <FileSpreadsheet size={14} />
+            <span className="hidden sm:inline">Excel (.xlsx)</span>
+          </button>
+
+          {/* Session Save */}
+          <button
+            onClick={exportSession}
+            disabled={subjects.length === 0}
+            className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200 border border-slate-700 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all"
+            title="Сохранить сессию JSON"
+          >
+            <Download size={14} />
+            <span className="hidden md:inline">Сохранить</span>
+          </button>
+
+          {/* Session Load */}
+          <label
+            className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer"
+            title="Загрузить сессию JSON или калибровку"
+          >
+            <Upload size={14} />
+            <span className="hidden md:inline">Загрузить</span>
+            <input
+              type="file"
+              accept=".json,.csv"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file?.name.toLowerCase().endsWith('.json')) {
+                  importSession(e);
+                } else {
+                  handleCalibrationFileUpload(e);
+                }
+              }}
+              className="hidden"
+            />
+          </label>
+
+          <div className="h-5 w-px bg-slate-800 mx-1 hidden sm:block"></div>
+
+          {/* Phases Toggle */}
+          <button
+            onClick={() => setUsePhasedMode(!usePhasedMode)}
+            className={`px-2.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1 transition-all ${
+              usePhasedMode
+                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                : 'text-slate-400 hover:text-white hover:bg-slate-800'
+            }`}
+            title="Анализ по этапам (начало, середина, конец)"
+          >
+            <Layers size={13} />
+            <span className="hidden lg:inline">{usePhasedMode ? 'Этапы: ВКЛ' : 'Этапы: ВЫКЛ'}</span>
+          </button>
+
+          {/* Clear Button */}
+          {subjects.length > 0 && (
+            <button
+              onClick={clearAllData}
+              className="p-1.5 text-slate-400 hover:text-rose-400 hover:bg-slate-800 rounded-xl transition-colors"
+              title="Очистить все загруженные данные"
             >
-              <Target size={20} />
+              <RefreshCcw size={15} />
             </button>
-            <button 
-              onClick={() => setIsCalibrating(!isCalibrating)}
-              className={`p-2.5 border rounded-xl transition-all ${isCalibrating ? 'bg-orange-600 border-orange-700 text-white shadow-lg ring-4 ring-orange-100' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'}`}
-              title="Режим ручной калибровки (стрелки, масштаб)"
-            >
-              <Settings2 size={20} className={isCalibrating ? "animate-spin-slow" : ""} />
-            </button>
-            <button 
-              onClick={() => setShowHeatmap(!showHeatmap)} 
-              className={`p-2.5 border rounded-xl transition-colors ${showHeatmap ? 'bg-red-600 border-red-700 text-white shadow-lg' : 'bg-white border-slate-200 text-slate-400 hover:bg-slate-50'}`}
-              title="Тепловая карта стартовых точек"
-            >
-              <Flame size={20} className={showHeatmap ? "animate-pulse" : ""} />
-            </button>
-            <button 
-              onClick={() => setShowFinishHeatmap(!showFinishHeatmap)} 
-              className={`p-2.5 border rounded-xl transition-colors ${showFinishHeatmap ? 'bg-emerald-600 border-emerald-700 text-white shadow-lg' : 'bg-white border-slate-200 text-slate-400 hover:bg-slate-50'}`}
-              title="Тепловая карта финишных точек"
-            >
-              <Flag size={20} className={showFinishHeatmap ? "animate-pulse" : ""} />
-            </button>
-            <button 
-              onClick={() => setShowBreaks(!showBreaks)} 
-              className={`p-2.5 border rounded-xl transition-colors ${showBreaks ? 'bg-amber-50 border-amber-200 text-amber-600' : 'bg-white border-slate-200 text-slate-400'}`}
-              title="Показать точки поворота"
-            >
-              <Zap size={20} />
-            </button>
-            <button onClick={clearAllData} className="p-2.5 bg-white border border-slate-200 rounded-xl text-slate-400 hover:bg-slate-50" title="Очистить все данные"><RefreshCcw size={20} /></button>
-            <button 
-              onClick={() => setUsePhasedMode(!usePhasedMode)} 
-              className={`flex items-center gap-2 px-5 py-2.5 rounded-xl font-bold transition-all shadow-sm ${usePhasedMode ? 'bg-amber-500 text-white hover:bg-amber-600' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
-            >
-              <Layers size={18} /> {usePhasedMode ? 'Этапы: ВКЛ' : 'Этапы: ВЫКЛ'}
-            </button>
-          </div>
-        ) : null}
+          )}
+        </div>
       </header>
 
-      <main className="max-w-[1720px] w-full mx-auto grid grid-cols-1 xl:grid-cols-12 gap-6 lg:gap-8">
-        <div className="xl:col-span-3 lg:col-span-4 space-y-6">
-          {isCalibrating && activeSubject && (
-            <div className="bg-orange-50 p-8 rounded-[32px] shadow-xl border border-orange-200 animate-in fade-in zoom-in duration-200 relative overflow-hidden">
-              <h2 className="text-lg font-bold mb-6 flex items-center gap-2 text-orange-700 relative z-10"><Move size={20} /> Калибровка решения</h2>
-              <div className="space-y-6 relative z-10">
-                <div className="grid grid-cols-1 gap-4">
-                  <div className="space-y-2">
-                    <label className="text-[10px] font-black uppercase text-orange-600 block">Сдвиг X (Пиксели)</label>
-                    <div className="flex items-center gap-2">
-                      <button onClick={() => handleCalibrationChange(prev => ({ offsetX: prev.offsetX - 1 }))} className="p-2.5 bg-white rounded-xl text-orange-600 shadow-sm hover:bg-orange-100 transition-colors"><ArrowLeft size={16} /></button>
-                      <input 
-                        type="number" 
-                        value={activeSubject.calibration.offsetX} 
-                        onChange={(e) => {
-                          const val = parseInt(e.target.value);
-                          handleCalibrationChange({ offsetX: isNaN(val) ? 0 : val });
-                        }} 
-                        className="flex-1 min-w-0 text-center text-sm font-bold py-2.5 rounded-xl border-none bg-white shadow-inner" 
-                      />
-                      <button onClick={() => handleCalibrationChange(prev => ({ offsetX: prev.offsetX + 1 }))} className="p-2.5 bg-white rounded-xl text-orange-600 shadow-sm hover:bg-orange-100 transition-colors"><ArrowRight size={16} /></button>
-                    </div>
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-[10px] font-black uppercase text-orange-600 block">Сдвиг Y (Пиксели)</label>
-                    <div className="flex items-center gap-2">
-                      <button onClick={() => handleCalibrationChange(prev => ({ offsetY: prev.offsetY - 1 }))} className="p-2.5 bg-white rounded-xl text-orange-600 shadow-sm hover:bg-orange-100 transition-colors"><ArrowUp size={16} /></button>
-                      <input 
-                        type="number" 
-                        value={activeSubject.calibration.offsetY} 
-                        onChange={(e) => {
-                          const val = parseInt(e.target.value);
-                          handleCalibrationChange({ offsetY: isNaN(val) ? 0 : val });
-                        }} 
-                        className="flex-1 min-w-0 text-center text-sm font-bold py-2.5 rounded-xl border-none bg-white shadow-inner" 
-                      />
-                      <button onClick={() => handleCalibrationChange(prev => ({ offsetY: prev.offsetY + 1 }))} className="p-2.5 bg-white rounded-xl text-orange-600 shadow-sm hover:bg-orange-100 transition-colors"><ArrowDown size={16} /></button>
-                    </div>
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <label className="text-[10px] font-black uppercase text-orange-600 block">Масштаб (Множитель)</label>
-                  <div className="flex items-center gap-2">
-                    <button onClick={() => handleCalibrationChange(prev => ({ scale: Math.max(0.1, prev.scale - 0.05) }))} className="p-2.5 bg-white rounded-xl text-orange-600 shadow-sm hover:bg-orange-100 transition-colors"><Minus size={16} /></button>
-                    <input 
-                        type="number" 
-                        step="0.01" 
-                        value={activeSubject.calibration.scale} 
-                        onChange={(e) => {
-                          const val = parseFloat(e.target.value);
-                          if (!isNaN(val)) handleCalibrationChange({ scale: val });
-                        }} 
-                        className="flex-1 min-w-0 text-center text-sm font-bold py-2.5 rounded-xl border-none bg-white shadow-inner" 
-                    />
-                    <button onClick={() => handleCalibrationChange(prev => ({ scale: prev.scale + 0.05 }))} className="p-2.5 bg-white rounded-xl text-orange-600 shadow-sm hover:bg-orange-100 transition-colors"><Plus size={16} /></button>
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <label className="text-[10px] font-black uppercase text-orange-600 block">Зона интереса (Чувствительность, px)</label>
-                  <div className="flex items-center gap-2">
-                    <button onClick={() => handleCalibrationChange(prev => ({ hitPadding: Math.max(0, prev.hitPadding - 1) }))} className="p-2.5 bg-white rounded-xl text-orange-600 shadow-sm hover:bg-orange-100 transition-colors"><Minus size={16} /></button>
-                    <input 
-                        type="number" 
-                        value={activeSubject.calibration.hitPadding} 
-                        onChange={(e) => {
-                          const val = parseInt(e.target.value);
-                          if (!isNaN(val)) handleCalibrationChange({ hitPadding: val });
-                        }} 
-                        className="flex-1 min-w-0 text-center text-sm font-bold py-2.5 rounded-xl border-none bg-white shadow-inner" 
-                    />
-                    <button onClick={() => handleCalibrationChange(prev => ({ hitPadding: prev.hitPadding + 1 }))} className="p-2.5 bg-white rounded-xl text-orange-600 shadow-sm hover:bg-orange-100 transition-colors"><Plus size={16} /></button>
-                  </div>
-                </div>
-                <div className="pt-2">
-                  <button 
-                    onClick={handleAutoCenter}
-                    className="w-full py-2.5 px-4 bg-gradient-to-r from-orange-500 to-amber-500 text-white font-black text-xs rounded-xl shadow-md hover:from-orange-600 hover:to-amber-600 transition-all flex items-center justify-center gap-2"
-                    title="Автоматически центрировать координаты рисунка относительно 9 точек"
-                  >
-                    <Target size={16} /> 🎯 Авто-подгонка к 9 точкам
-                  </button>
-                </div>
-                <div className="pt-2 border-t border-orange-200 flex justify-between gap-2">
-                  <button onClick={() => handleCalibrationChange({ offsetX: 0, offsetY: 0, scale: 1.0 })} className="text-[10px] font-bold text-orange-500 hover:underline">Сброс</button>
-                  <button onClick={() => setIsCalibrating(false)} className="px-6 py-2 bg-orange-600 text-white rounded-xl text-xs font-bold hover:bg-orange-700 transition-colors">Готово</button>
-                </div>
-                <div className="text-[9px] text-orange-500/80 font-medium italic text-center">Перетаскивайте нарисованное решение прямо на холсте для точной калибровки</div>
-              </div>
+      {/* ================= MAIN WORKSPACE CONTAINER ================= */}
+      <div className="flex-1 flex overflow-hidden bg-slate-950 w-full">
+        {/* ================= 1. LEFT SIDEBAR: SUBJECTS ================= */}
+        <aside className="w-72 bg-slate-900 border-r border-slate-800 flex flex-col shrink-0 select-none">
+          {/* Search & Filter Header */}
+          <div className="p-3 border-b border-slate-800 space-y-2">
+            <div className="relative">
+              <Search size={14} className="text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={subjectSearch}
+                onChange={(e) => setSubjectSearch(e.target.value)}
+                placeholder="Поиск испытуемого..."
+                className="w-full bg-slate-800/80 text-xs text-white pl-8 pr-7 py-1.5 rounded-xl border border-slate-700/60 focus:outline-none focus:border-indigo-500 placeholder-slate-500"
+              />
+              {subjectSearch && (
+                <button
+                  onClick={() => setSubjectSearch('')}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                >
+                  <X size={12} />
+                </button>
+              )}
             </div>
-          )}
+            <div className="flex justify-between items-center text-[11px] text-slate-400 px-1">
+              <span>
+                Всего: <b className="text-white">{subjects.length}</b> (решили: <b className="text-amber-400">{solvedCount}</b>)
+              </span>
+              {excludedSubjects.size > 0 && (
+                <span className="text-[10px] text-rose-400 font-bold">
+                  Искл: {excludedSubjects.size}
+                </span>
+              )}
+            </div>
+          </div>
 
-          {subjects.length > 0 && (
-            <div className="bg-white p-8 rounded-[32px] shadow-xl border border-slate-100">
-              <h2 className="text-lg font-bold mb-6 flex items-center gap-2"><Users size={20} className="text-indigo-500" /> Испытуемые</h2>
-              <div className="space-y-2 max-h-[300px] overflow-y-auto pr-2 custom-scrollbar">
-                {subjects.map(s => (
-                  <div key={s.id} className={`flex gap-2 group ${excludedSubjects.has(s.id) ? 'opacity-40 grayscale' : ''}`}>
-                    <button 
-                      onClick={() => toggleExcludeSubject(s.id)}
-                      className={`p-3 rounded-xl border transition-all ${excludedSubjects.has(s.id) ? 'bg-red-50 border-red-200 text-red-500' : 'bg-white border-slate-100 text-slate-300 hover:border-red-200 hover:text-red-400'}`}
-                      title={excludedSubjects.has(s.id) ? "Включить испытуемого в анализ" : "Исключить испытуемого из анализа"}
-                    >
-                      <X size={16} />
-                    </button>
-                    <button 
-                      onClick={() => { setActiveSubjectId(s.id); setSelectedTrialId(null); }}
-                      className={`flex-1 flex justify-between items-center p-3 rounded-xl transition-all ${activeSubjectId === s.id ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-200' : 'bg-slate-50 text-slate-600 hover:bg-slate-100'} ${s.isSolved ? 'ring-1 ring-yellow-400/50 shadow-inner' : ''}`}
-                    >
-                      <div className="flex flex-col items-start gap-1 overflow-hidden text-left">
-                        <span className="text-[11px] font-bold truncate w-full">{s.lastName} {s.firstName}</span>
-                        <span className="text-[9px] opacity-40 font-mono italic">ID: {s.id}</span>
+          {/* Subject List Scrollable */}
+          <div className="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1.5">
+            {filteredSubjects.length === 0 ? (
+              <div className="p-6 text-center text-xs text-slate-500">
+                {subjects.length === 0 ? (
+                  <div className="space-y-2">
+                    <Users size={28} className="mx-auto text-slate-600" />
+                    <p>Нет загруженных данных</p>
+                    <p className="text-[10px] text-slate-600">Нажмите кнопку ниже для добавления CSV</p>
+                  </div>
+                ) : (
+                  "Испытуемые не найдены"
+                )}
+              </div>
+            ) : (
+              filteredSubjects.map(s => {
+                const isSelected = activeSubjectId === s.id;
+                const isExcluded = excludedSubjects.has(s.id);
+                const subTrials = processedData.filter(t => t.subjectId === s.id);
+                const subLinesCount = subTrials.reduce((acc, t) => acc + t.lines.length, 0);
+                const groupName = subjectGroups[s.id];
+
+                return (
+                  <div
+                    key={s.id}
+                    onClick={() => { setActiveSubjectId(s.id); setSelectedTrialId(null); }}
+                    className={`p-2.5 rounded-xl border flex items-center justify-between group cursor-pointer transition-all ${
+                      isSelected
+                        ? 'bg-indigo-600 text-white border-indigo-500 shadow-lg shadow-indigo-600/30'
+                        : isExcluded
+                        ? 'bg-slate-900/60 text-slate-500 border-dashed border-rose-900/50 opacity-50 hover:opacity-100'
+                        : 'bg-slate-800/60 hover:bg-slate-800 text-slate-300 border-slate-800 hover:border-slate-700'
+                    }`}
+                  >
+                    <div className="flex flex-col min-w-0 pr-1">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className={`text-xs font-bold truncate max-w-[130px] ${isExcluded ? 'line-through' : ''}`}>
+                          {s.lastName || s.firstName ? `${s.lastName || ''} ${s.firstName || ''}`.trim() : s.id}
+                        </span>
                         {s.isSolved && (
-                          <div className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[8px] font-black uppercase transition-colors ${activeSubjectId === s.id ? 'bg-white/20 text-white' : 'bg-yellow-400/20 text-yellow-600'}`}>
-                            <Trophy size={10} /> Решено
-                          </div>
+                          <span className={`text-[8px] font-black px-1 py-0.2 rounded uppercase tracking-wider ${
+                            isSelected ? 'bg-amber-400/30 text-amber-200' : 'bg-amber-400/15 text-amber-300 border border-amber-400/30'
+                          }`}>
+                            РЕШИЛ
+                          </span>
+                        )}
+                        {isExcluded && (
+                          <span className="text-[8px] font-black px-1 py-0.2 rounded uppercase bg-rose-500/20 text-rose-300 border border-rose-500/30">
+                            ИСКЛ
+                          </span>
                         )}
                       </div>
-                      {activeSubjectId === s.id && <ChevronRight size={14} className="opacity-50" />}
-                    </button>
-                    <button onClick={() => toggleSubjectSolved(s.id)} className={`p-3 rounded-xl border transition-all ${s.isSolved ? 'bg-yellow-50 border-yellow-200 text-yellow-600 shadow-inner' : 'bg-white border-slate-100 text-slate-300 hover:border-yellow-200 hover:text-yellow-400'}`} title={s.isSolved ? "Пометить как 'Не решил'" : "Пометить как 'Решил'"}>
-                      <Trophy size={16} />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
+                      <div className="text-[10px] opacity-70 flex items-center gap-1 mt-0.5">
+                        <span>{subTrials.length} проб</span>
+                        <span>•</span>
+                        <span>{subLinesCount} линий</span>
+                        {groupName && (
+                          <>
+                            <span>•</span>
+                            <span className="truncate max-w-[60px] text-indigo-300">{groupName}</span>
+                          </>
+                        )}
+                      </div>
+                    </div>
 
-          <div className="bg-white p-8 rounded-[32px] shadow-xl border border-slate-100">
-            <h2 className="text-lg font-bold mb-6 flex items-center gap-2"><Upload size={20} className="text-blue-500" /> Загрузка</h2>
-            <div className="space-y-4">
-              <label className="block w-full cursor-pointer group">
-                <div className="border-2 border-dashed border-slate-200 rounded-2xl p-8 text-center group-hover:border-blue-400 group-hover:bg-blue-50 transition-all">
-                  <Scissors size={40} className="mx-auto mb-4 text-slate-300 group-hover:text-blue-400" />
-                  <span className="text-sm font-bold text-slate-600 block mb-1">Выбрать CSV файлы</span>
-                  <input type="file" accept=".csv" multiple onChange={handleFileUpload} className="hidden" />
-                </div>
-              </label>
-              
-              <div className="pt-4 border-t border-slate-100 space-y-3">
-                 <label className="flex items-center gap-3 w-full cursor-pointer p-3 bg-slate-50 rounded-2xl hover:bg-slate-100 border border-transparent hover:border-slate-200 transition-all text-slate-600 group">
-                    <div className="p-2 bg-white rounded-xl text-indigo-500"><FileSpreadsheet size={18} /></div>
-                    <div className="flex-1">
-                      <span className="text-[11px] font-black uppercase tracking-tight block">Загрузить сессию (JSON)</span>
+                    <div className="flex items-center gap-1 shrink-0" onClick={e => e.stopPropagation()}>
+                      <button
+                        onClick={() => toggleSubjectSolved(s.id)}
+                        className={`p-1 rounded-lg transition-colors ${
+                          s.isSolved
+                            ? 'text-amber-300 hover:bg-amber-400/20'
+                            : 'text-slate-500 hover:text-amber-400 hover:bg-slate-700/60'
+                        }`}
+                        title={s.isSolved ? "Пометить как 'Не решил'" : "Пометить как 'Решил'"}
+                      >
+                        <Trophy size={13} />
+                      </button>
+                      <button
+                        onClick={() => toggleExcludeSubject(s.id)}
+                        className={`p-1 rounded-lg transition-colors ${
+                          isExcluded
+                            ? 'text-amber-400 hover:bg-amber-500/20'
+                            : 'text-slate-500 hover:text-rose-400 hover:bg-slate-700/60'
+                        }`}
+                        title={isExcluded ? "Вернуть испытуемого в анализ" : "Исключить из анализа"}
+                      >
+                        {isExcluded ? <RotateCcw size={13} /> : <X size={13} />}
+                      </button>
                     </div>
-                    <input type="file" accept=".csv,.json" onChange={(e) => {
-                      const file = e.target.files?.[0];
-                      if (file?.name.toLowerCase().endsWith('.json')) {
-                        importSession(e);
-                      } else {
-                        handleCalibrationFileUpload(e);
-                      }
-                    }} className="hidden" />
-                 </label>
-                 <label className="flex items-center gap-3 w-full cursor-pointer p-3 bg-slate-50 rounded-2xl hover:bg-slate-100 border border-transparent hover:border-slate-200 transition-all text-slate-600 group">
-                    <div className="p-2 bg-white rounded-xl text-emerald-500"><Briefcase size={18} /></div>
-                    <div className="flex flex-col">
-                      <span className="text-[11px] font-black uppercase tracking-tight">Загрузить опыт (CSV)</span>
-                    </div>
-                    <input type="file" accept=".csv" onChange={handleExperienceFileUpload} className="hidden" />
-                 </label>
-              </div>
-            </div>
-            {log.length > 0 && (
-              <div className="mt-6 p-4 bg-slate-900 rounded-xl font-mono text-[10px] text-slate-300 space-y-1 overflow-x-auto max-h-[150px] custom-scrollbar">
-                {log.map((l, i) => <div key={i} className="whitespace-nowrap"><span className="text-blue-400">[{i}]</span> {l}</div>)}
-              </div>
+                  </div>
+                );
+              })
             )}
           </div>
 
-          {activeSubject && (
-             <div className="bg-white p-8 rounded-[32px] shadow-xl border border-slate-100 animate-in fade-in slide-in-from-top-4">
-               <h2 className="text-lg font-bold mb-6 flex items-center gap-2 text-slate-700"><Info size={20} className="text-blue-500" /> Информация</h2>
-               <div className="space-y-4">
-                 <div className="flex items-center gap-4 p-3 bg-slate-50 rounded-2xl">
-                   <div className="p-2.5 bg-white rounded-xl text-blue-600 shadow-sm"><User size={20} /></div>
-                   <div className="flex-1">
-                     <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">ФИО испытуемого</p>
-                      <div className="flex items-center gap-2 mt-1">
-                        <input 
-                          type="text" 
-                          value={activeSubject.lastName || ""} 
+          {/* Quick Upload Button at Bottom */}
+          <div className="p-3 border-t border-slate-800 bg-slate-900/50">
+            <label className="w-full py-2 bg-slate-800 hover:bg-slate-700/80 border border-dashed border-slate-700 text-slate-300 rounded-xl text-xs font-bold flex items-center justify-center gap-2 cursor-pointer transition-all">
+              <Plus size={15} className="text-indigo-400" />
+              <span>Добавить CSV файлы</span>
+              <input type="file" accept=".csv" multiple onChange={handleFileUpload} className="hidden" />
+            </label>
+          </div>
+        </aside>
+
+        {/* ================= 2. MAIN CENTER DASHBOARD ================= */}
+        <main className="flex-1 flex flex-col min-w-0 bg-slate-950 overflow-hidden">
+          {/* Sub-bar: Workspace Tabs & Quick Calibration Status */}
+          <div className="h-11 bg-slate-900/60 border-b border-slate-800/80 px-4 flex items-center justify-between shrink-0 select-none">
+            {/* Tabs */}
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => setActiveTab('analysis')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
+                  activeTab === 'analysis'
+                    ? 'bg-indigo-600/20 text-indigo-300 border border-indigo-500/30'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+                }`}
+              >
+                <Target size={14} /> <span>Проба & Анализ</span>
+              </button>
+              <button
+                onClick={() => setActiveTab('geometry')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
+                  activeTab === 'geometry'
+                    ? 'bg-indigo-600/20 text-indigo-300 border border-indigo-500/30'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+                }`}
+              >
+                <Scissors size={14} /> <span>Линии и сегменты</span>
+              </button>
+              <button
+                onClick={() => setActiveTab('heatmaps')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
+                  activeTab === 'heatmaps'
+                    ? 'bg-indigo-600/20 text-indigo-300 border border-indigo-500/30'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+                }`}
+              >
+                <Flame size={14} /> <span>Тепловые карты</span>
+              </button>
+              <button
+                onClick={() => setActiveTab('reports')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
+                  activeTab === 'reports'
+                    ? 'bg-indigo-600/20 text-indigo-300 border border-indigo-500/30'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+                }`}
+              >
+                <FileSpreadsheet size={14} /> <span>Сводный отчет & Экспорт</span>
+              </button>
+            </div>
+
+            {/* Quick Tools on Right of Sub-bar */}
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleAutoCenter}
+                disabled={!activeSubject}
+                className="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500/30 disabled:opacity-40 text-amber-300 border border-amber-500/30 rounded-lg text-[11px] font-bold flex items-center gap-1.5 transition-all"
+                title="Автоматически центрировать координаты рисунка относительно 9 точек"
+              >
+                <Target size={13} /> <span className="hidden md:inline">Авто-подгонка к 9 точкам</span>
+              </button>
+              <button
+                onClick={() => setIsCalibrating(!isCalibrating)}
+                disabled={!activeSubject}
+                className={`px-2.5 py-1 rounded-lg text-[11px] font-medium flex items-center gap-1.5 transition-all ${
+                  isCalibrating
+                    ? 'bg-orange-600 text-white font-bold shadow-md shadow-orange-600/30'
+                    : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
+                }`}
+                title="Включить ручную калибровку (сдвиг, масштаб)"
+              >
+                <Move size={13} className={isCalibrating ? "text-white" : "text-orange-400"} />
+                <span className="hidden md:inline">Ручная калибровка</span>
+              </button>
+              <button
+                onClick={() => setShowBreaks(!showBreaks)}
+                className={`p-1.5 rounded-lg text-xs transition-colors ${
+                  showBreaks ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' : 'bg-slate-800 text-slate-400 hover:text-white'
+                }`}
+                title="Показать точки поворота"
+              >
+                <Zap size={14} />
+              </button>
+            </div>
+          </div>
+
+          {/* ================= TAB 1: АНАЛИЗ ПРОБЫ ================= */}
+          {activeTab === 'analysis' && (
+            <div className="flex-1 p-4 grid grid-cols-12 gap-4 overflow-hidden">
+              {/* LEFT COLUMN: Canvas Viewer & Controls (7 of 12 cols) */}
+              <div className="col-span-12 xl:col-span-7 flex flex-col bg-slate-900 rounded-2xl border border-slate-800 overflow-hidden shadow-2xl relative">
+                {/* Canvas Toolbar Header */}
+                <div className="h-10 px-3 bg-slate-800/60 border-b border-slate-800 flex items-center justify-between shrink-0">
+                  {/* Trial Navigation & DIRECT EXCLUDE BUTTON */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold text-white flex items-center gap-1">
+                      {selectedTrialId !== null ? (
+                        <>Проба <span className="text-indigo-400 font-black">#{selectedTrialId}</span> <span className="text-[10px] text-slate-500">из {activeSubjectTrials.length}</span></>
+                      ) : (
+                        <>Все пробы <span className="text-indigo-400 font-black">({activeSubjectTrials.length})</span></>
+                      )}
+                    </span>
+                    <div className="flex items-center bg-slate-900 rounded-lg border border-slate-700/60 p-0.5">
+                      <button onClick={() => navigateTrial('prev')} className="p-1 hover:bg-slate-800 text-slate-400 hover:text-white rounded" title="Предыдущая проба">
+                        <ChevronLeft size={14} />
+                      </button>
+                      <button onClick={() => navigateTrial('next')} className="p-1 hover:bg-slate-800 text-slate-400 hover:text-white rounded" title="Следующая проба">
+                        <ChevronRight size={14} />
+                      </button>
+                    </div>
+
+                    {/* DIRECT TRIAL EXCLUSION BUTTON */}
+                    {selectedTrialId !== null && (() => {
+                      const isExcluded = activeSubjectId && excludedTrials.has(`${activeSubjectId}-${selectedTrialId}`);
+                      return (
+                        <button
+                          onClick={() => {
+                            if (activeSubjectId) toggleTrialExclusion(activeSubjectId, selectedTrialId);
+                          }}
+                          className={`ml-1 px-2.5 py-0.5 rounded-lg text-[11px] font-bold flex items-center gap-1 transition-all ${
+                            isExcluded
+                              ? 'bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30'
+                              : 'bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/20 hover:border-rose-500/40'
+                          }`}
+                          title={isExcluded ? "Вернуть пробу в общий анализ" : "Исключить пробу из выгрузки и анализа"}
+                        >
+                          {isExcluded ? <RotateCcw size={12} /> : <Ban size={12} />}
+                          <span>{isExcluded ? 'Вернуть пробу' : 'Исключить пробу'}</span>
+                        </button>
+                      );
+                    })()}
+                  </div>
+
+                  {/* Canvas View Controls (Zoom, Reset, 1:1) */}
+                  <div className="flex items-center gap-1 text-xs text-slate-400">
+                    <button
+                      onClick={() => { setAutoFit(false); setZoom(z => Math.max(0.15, +(z * 0.85).toFixed(2))); }}
+                      title="Уменьшить масштаб (-)"
+                      className="p-1 hover:bg-slate-800 text-slate-400 hover:text-white rounded"
+                    >
+                      <ZoomOut size={14} />
+                    </button>
+                    <span className="text-[11px] font-mono font-bold text-slate-300 px-1 min-w-[36px] text-center select-none">
+                      {Math.round(currentScale * 100)}%
+                    </span>
+                    <button
+                      onClick={() => { setAutoFit(false); setZoom(z => Math.min(5, +(z * 1.15).toFixed(2))); }}
+                      title="Увеличить масштаб (+)"
+                      className="p-1 hover:bg-slate-800 text-slate-400 hover:text-white rounded"
+                    >
+                      <ZoomIn size={14} />
+                    </button>
+                    <div className="h-3 w-px bg-slate-700 mx-1" />
+                    <button
+                      onClick={() => { setAutoFit(true); setZoom(1); setPanOffset({ x: 0, y: 0 }); }}
+                      title="Вписать пробу в холст"
+                      className={`px-1.5 py-0.5 rounded text-[11px] font-bold transition-colors ${
+                        autoFit ? 'bg-indigo-600/30 text-indigo-300' : 'hover:bg-slate-800 text-slate-400'
+                      }`}
+                    >
+                      Авто
+                    </button>
+                    <button
+                      onClick={() => { setAutoFit(false); setZoom(1); setPanOffset({ x: 0, y: 0 }); }}
+                      title="Сброс масштаба 100%"
+                      className="px-1.5 py-0.5 rounded text-[11px] font-bold hover:bg-slate-800 text-slate-400 hover:text-white"
+                    >
+                      1:1
+                    </button>
+                  </div>
+                </div>
+
+                {/* Canvas Container */}
+                <div
+                  className="flex-1 relative flex items-center justify-center bg-[#eef2f6] overflow-hidden cursor-crosshair min-h-[300px]"
+                  id="canvasContainer"
+                >
+                  <canvas
+                    ref={canvasRef}
+                    width={CANVAS_SIZE}
+                    height={CANVAS_SIZE}
+                    className={`w-full h-full object-contain bg-[#eef2f6] ${
+                      isCalibrating
+                        ? (isDraggingGrid ? 'cursor-grabbing' : 'cursor-grab')
+                        : (isPanning ? 'cursor-grabbing' : (currentScale > 1 || !autoFit ? 'cursor-grab' : 'cursor-default'))
+                    }`}
+                    onMouseDown={handleMainCanvasMouseDown}
+                    onMouseMove={handleMainCanvasMouseMove}
+                    onMouseUp={handleMainCanvasMouseUp}
+                    onMouseLeave={handleMainCanvasMouseUp}
+                  />
+
+                  {/* Watermark if current trial is excluded */}
+                  {selectedTrialId !== null && activeSubjectId && excludedTrials.has(`${activeSubjectId}-${selectedTrialId}`) && (
+                    <div className="absolute top-4 left-4 bg-rose-600 text-white border border-rose-700 px-3 py-1 rounded-xl text-xs font-bold uppercase tracking-wider backdrop-blur-md flex items-center gap-1.5 shadow-lg">
+                      <Ban size={14} />
+                      <span>Проба исключена из анализа</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Trial Ribbon Carousel */}
+                {activeSubject && activeSubjectTrials.length > 0 && (
+                  <div className="shrink-0 border-t border-slate-800 bg-slate-900/90 p-2.5 select-none">
+                    <div className="flex items-center justify-between mb-1.5 px-1">
+                      <div className="flex items-center gap-1.5">
+                        <Layers size={13} className="text-indigo-400" />
+                        <span className="text-[11px] font-bold text-white">Лента проб ({activeSubjectTrials.length})</span>
+                      </div>
+                      <button
+                        onClick={() => setSelectedTrialId(null)}
+                        className={`px-2 py-0.5 rounded text-[10px] font-bold transition-all ${
+                          selectedTrialId === null
+                            ? 'bg-indigo-600 text-white'
+                            : 'bg-slate-800 text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        Все пробы
+                      </button>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 overflow-x-auto custom-scrollbar pb-1 pt-0.5">
+                      {activeSubjectTrials.map((t, idx) => {
+                        const isSelected = selectedTrialId === t.trialId;
+                        const isExcluded = excludedTrials.has(`${activeSubjectId}-${t.trialId}`);
+                        const hasChord = t.lines.some(l => l.type === 'хордовая');
+                        const isLastTrial = idx === activeSubjectTrials.length - 1 && activeSubject.isSolved;
+
+                        return (
+                          <button
+                            key={t.trialId}
+                            onClick={() => setSelectedTrialId(isSelected ? null : t.trialId)}
+                            className={`px-2.5 py-1 rounded-xl text-xs font-bold shrink-0 flex items-center gap-1.5 border transition-all ${
+                              isSelected
+                                ? 'bg-indigo-600 text-white border-indigo-500 shadow-md shadow-indigo-600/30 ring-2 ring-indigo-400/50'
+                                : isExcluded
+                                ? 'bg-slate-900 text-slate-500 border-dashed border-rose-900/60 line-through opacity-60'
+                                : 'bg-slate-800/80 hover:bg-slate-800 text-slate-300 border-slate-700/60 hover:border-slate-600'
+                            }`}
+                          >
+                            <span
+                              className={`w-2 h-2 rounded-full shrink-0 ${
+                                isLastTrial ? 'bg-amber-400 ring-2 ring-amber-300/40' :
+                                hasChord ? 'bg-amber-400' :
+                                isExcluded ? 'bg-rose-500' :
+                                isSelected ? 'bg-white' : 'bg-slate-500'
+                              }`}
+                            />
+                            <span>#{t.trialId}</span>
+                            <span className="text-[9px] opacity-70 font-mono">
+                              {(t.trial_time_ms / 1000).toFixed(1)}с
+                            </span>
+                            {isLastTrial && <span className="text-[10px]" title="Решение задачи">🏆</span>}
+                            {hasChord && !isLastTrial && <span className="text-[10px] text-amber-300" title="Хордовая линия">⭐</span>}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Compact Trial Log Table */}
+                {activeSubject && (
+                  <div className="shrink-0 border-t border-slate-800 bg-slate-950 p-2.5 max-h-40 overflow-y-auto custom-scrollbar select-none">
+                    <table className="w-full text-left text-xs text-slate-300">
+                      <thead className="text-[9px] uppercase font-bold text-slate-400 sticky top-0 bg-slate-950 z-10 border-b border-slate-800">
+                        <tr>
+                          <th className="py-1 px-2">Проба</th>
+                          <th className="py-1 px-2">Линия</th>
+                          <th className="py-1 px-2">Тип</th>
+                          <th className="py-1 px-2">Время</th>
+                          <th className="py-1 px-2">Узлы</th>
+                          <th className="py-1 px-2 text-right">Действия</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-900">
+                        {activeSubjectTrials
+                          .filter(t => selectedTrialId === null || t.trialId === selectedTrialId)
+                          .map(t => (
+                            <React.Fragment key={`${t.subjectId}-${t.trialId}`}>
+                              {t.lines.map((l, lIdx) => {
+                                const overrideKey = `${t.subjectId}-${t.trialId}`;
+                                const isOverridden = manualOverrides.has(overrideKey);
+                                const isTrialExcluded = excludedTrials.has(`${t.subjectId}-${t.trialId}`);
+                                const isLineExcluded = excludedLines.has(`${t.subjectId}-${t.trialId}-${lIdx}`);
+                                const isTrialSelected = selectedTrialId === t.trialId;
+
+                                return (
+                                  <tr
+                                    key={`${t.trialId}-${lIdx}`}
+                                    className={`transition-colors ${
+                                      isTrialSelected ? 'bg-indigo-950/40' : 'hover:bg-slate-900/60'
+                                    } ${isTrialExcluded || isLineExcluded ? 'opacity-40 line-through decoration-rose-500/60' : ''}`}
+                                  >
+                                    <td className="py-1 px-2 font-mono font-bold text-white text-[11px]">
+                                      #{t.trialId}
+                                    </td>
+                                    <td className="py-1 px-2 text-slate-400 font-mono text-[10px]">
+                                      №{lIdx + 1}
+                                    </td>
+                                    <td className="py-1 px-2">
+                                      <span className={`px-1.5 py-0.2 rounded text-[9px] font-bold border ${
+                                        l.type === 'хордовая'
+                                          ? 'bg-amber-500/20 text-amber-300 border-amber-500/30'
+                                          : l.type === 'боковая'
+                                          ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/30'
+                                          : 'bg-slate-800 text-slate-300 border-slate-700'
+                                      }`}>
+                                        {isOverridden ? 'прочая' : l.type}
+                                      </span>
+                                    </td>
+                                    <td className="py-1 px-2 font-mono text-slate-400 text-[10px]">
+                                      {lIdx === 0 ? `${t.trial_time_ms.toFixed(0)}мс` : ''}
+                                    </td>
+                                    <td className="py-1 px-2 font-bold text-indigo-400 font-mono text-[10px]">
+                                      {l.nodesVisited.join(' → ') || '---'}
+                                    </td>
+                                    <td className="py-1 px-2 text-right">
+                                      <div className="flex items-center justify-end gap-1">
+                                        {lIdx === 0 && (
+                                          <button
+                                            onClick={() => toggleTrialExclusion(t.subjectId, t.trialId)}
+                                            className={`p-1 rounded transition-colors ${
+                                              isTrialExcluded
+                                                ? 'text-amber-400 hover:bg-amber-500/20'
+                                                : 'text-slate-500 hover:text-rose-400'
+                                            }`}
+                                            title={isTrialExcluded ? "Вернуть пробу в анализ" : "Исключить пробу из анализа"}
+                                          >
+                                            {isTrialExcluded ? <RotateCcw size={12} /> : <Ban size={12} />}
+                                          </button>
+                                        )}
+                                        {lIdx === 0 && (
+                                          <button
+                                            onClick={() => toggleOverride(t)}
+                                            className="p-1 rounded text-slate-500 hover:text-rose-400 transition-colors"
+                                            title={isOverridden ? "Вернуть исходные типы" : "Пометить как прочую"}
+                                          >
+                                            {isOverridden ? <RotateCcw size={12} /> : <Trash2 size={12} />}
+                                          </button>
+                                        )}
+                                        {lIdx === 0 && (
+                                          <button
+                                            onClick={() => setSelectedTrialId(isTrialSelected ? null : t.trialId)}
+                                            className={`p-1 rounded transition-colors ${
+                                              isTrialSelected ? 'text-indigo-300' : 'text-slate-500 hover:text-indigo-400'
+                                            }`}
+                                            title={isTrialSelected ? "Показать все пробы" : "Изолировать пробу на холсте"}
+                                          >
+                                            <Eye size={12} />
+                                          </button>
+                                        )}
+                                        <button
+                                          onClick={() => toggleLineExclusion(t.subjectId, t.trialId, lIdx)}
+                                          className={`p-1 rounded transition-colors ${
+                                            isLineExcluded ? 'text-amber-400' : 'text-slate-500 hover:text-amber-400'
+                                          }`}
+                                          title={isLineExcluded ? "Вернуть линию в статистику" : "Исключить линию из статистики"}
+                                        >
+                                          {isLineExcluded ? <RotateCcw size={12} /> : <Scissors size={12} />}
+                                        </button>
+                                      </div>
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </React.Fragment>
+                          ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              {/* RIGHT COLUMN: Analytics Stack (5 of 12 cols) */}
+              <div className="col-span-12 xl:col-span-5 flex flex-col gap-4 overflow-y-auto custom-scrollbar pr-1 select-none">
+                {/* CALIBRATION PANEL IF ACTIVE */}
+                {isCalibrating && activeSubject && (
+                  <div className="bg-slate-900 p-4 rounded-2xl border border-amber-500/40 shadow-xl space-y-4 animate-in fade-in duration-200">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-xs font-bold text-amber-400 flex items-center gap-1.5">
+                        <Move size={14} /> Калибровка координат рисунка
+                      </h3>
+                      <button onClick={() => setIsCalibrating(false)} className="text-[10px] text-slate-400 hover:text-white">
+                        Закрыть
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3 text-xs">
+                      <div>
+                        <span className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Сдвиг X (px)</span>
+                        <div className="flex items-center gap-1">
+                          <button onClick={() => handleCalibrationChange(prev => ({ offsetX: prev.offsetX - 1 }))} className="p-1 bg-slate-800 rounded text-slate-300 hover:bg-slate-700"><ArrowLeft size={12} /></button>
+                          <input
+                            type="number"
+                            value={activeSubject.calibration.offsetX}
+                            onChange={(e) => {
+                              const val = parseInt(e.target.value);
+                              handleCalibrationChange({ offsetX: isNaN(val) ? 0 : val });
+                            }}
+                            className="w-full bg-slate-800 text-white text-center py-1 rounded text-xs font-bold border border-slate-700"
+                          />
+                          <button onClick={() => handleCalibrationChange(prev => ({ offsetX: prev.offsetX + 1 }))} className="p-1 bg-slate-800 rounded text-slate-300 hover:bg-slate-700"><ArrowRight size={12} /></button>
+                        </div>
+                      </div>
+                      <div>
+                        <span className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Сдвиг Y (px)</span>
+                        <div className="flex items-center gap-1">
+                          <button onClick={() => handleCalibrationChange(prev => ({ offsetY: prev.offsetY - 1 }))} className="p-1 bg-slate-800 rounded text-slate-300 hover:bg-slate-700"><ArrowUp size={12} /></button>
+                          <input
+                            type="number"
+                            value={activeSubject.calibration.offsetY}
+                            onChange={(e) => {
+                              const val = parseInt(e.target.value);
+                              handleCalibrationChange({ offsetY: isNaN(val) ? 0 : val });
+                            }}
+                            className="w-full bg-slate-800 text-white text-center py-1 rounded text-xs font-bold border border-slate-700"
+                          />
+                          <button onClick={() => handleCalibrationChange(prev => ({ offsetY: prev.offsetY + 1 }))} className="p-1 bg-slate-800 rounded text-slate-300 hover:bg-slate-700"><ArrowDown size={12} /></button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3 text-xs">
+                      <div>
+                        <span className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Масштаб</span>
+                        <div className="flex items-center gap-1">
+                          <button onClick={() => handleCalibrationChange(prev => ({ scale: Math.max(0.1, +(prev.scale - 0.05).toFixed(2)) }))} className="p-1 bg-slate-800 rounded text-slate-300 hover:bg-slate-700"><Minus size={12} /></button>
+                          <input
+                            type="number"
+                            step="0.01"
+                            value={activeSubject.calibration.scale}
+                            onChange={(e) => {
+                              const val = parseFloat(e.target.value);
+                              if (!isNaN(val)) handleCalibrationChange({ scale: val });
+                            }}
+                            className="w-full bg-slate-800 text-white text-center py-1 rounded text-xs font-bold border border-slate-700"
+                          />
+                          <button onClick={() => handleCalibrationChange(prev => ({ scale: +(prev.scale + 0.05).toFixed(2) }))} className="p-1 bg-slate-800 rounded text-slate-300 hover:bg-slate-700"><Plus size={12} /></button>
+                        </div>
+                      </div>
+                      <div>
+                        <span className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Чувств-ть (px)</span>
+                        <div className="flex items-center gap-1">
+                          <button onClick={() => handleCalibrationChange(prev => ({ hitPadding: Math.max(0, prev.hitPadding - 1) }))} className="p-1 bg-slate-800 rounded text-slate-300 hover:bg-slate-700"><Minus size={12} /></button>
+                          <input
+                            type="number"
+                            value={activeSubject.calibration.hitPadding}
+                            onChange={(e) => {
+                              const val = parseInt(e.target.value);
+                              if (!isNaN(val)) handleCalibrationChange({ hitPadding: val });
+                            }}
+                            className="w-full bg-slate-800 text-white text-center py-1 rounded text-xs font-bold border border-slate-700"
+                          />
+                          <button onClick={() => handleCalibrationChange(prev => ({ hitPadding: prev.hitPadding + 1 }))} className="p-1 bg-slate-800 rounded text-slate-300 hover:bg-slate-700"><Plus size={12} /></button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex gap-2">
+                      <button onClick={handleAutoCenter} className="flex-1 py-1.5 bg-amber-500 hover:bg-amber-600 text-slate-900 font-black rounded-lg text-xs flex items-center justify-center gap-1.5 transition-colors">
+                        <Target size={13} /> Авто-подгонка
+                      </button>
+                      <button onClick={() => handleCalibrationChange({ offsetX: 0, offsetY: 0, scale: 1.0 })} className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold rounded-lg text-xs transition-colors">
+                        Сброс
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* CARD 1: PROBING CONVERGENCE GRAPH */}
+                {activeSubject && (
+                  <div className="bg-slate-900 rounded-2xl border border-slate-800 p-4 shadow-xl">
+                    <ProbingConvergenceGraph
+                      trials={processedData.filter(t => t.subjectId === activeSubjectId)}
+                      nodes={activeSubject.nodes}
+                      calibration={activeSubject.calibration}
+                      selectedTrialId={selectedTrialId}
+                      onSelectTrial={(tId) => setSelectedTrialId(tId)}
+                      excludedTrials={excludedTrials}
+                      subjectId={activeSubjectId || ''}
+                      allSubjects={subjects}
+                      allProcessedData={processedData}
+                      subjectGroups={subjectGroups}
+                      excludedSubjects={excludedSubjects}
+                      apexConfig={getApexConfig(activeSubjectId || '')}
+                      onUpdateApexConfig={(updates) => activeSubjectId && updateApexConfig(activeSubjectId, updates)}
+                      onResetApexConfig={() => activeSubjectId && handleResetApexConfig(activeSubjectId)}
+                      onAutoAlignApex={() => activeSubjectId && handleAutoAlignApex(activeSubjectId)}
+                      onBatchAutoAlignAllSolvers={handleBatchAutoAlignAllSolvers}
+                      isCurrentSubjectSolved={!!activeSubject.isSolved}
+                      subjectApexConfigs={subjectApexConfigs}
+                      globalBoxPadding={globalBoxPadding}
+                      onUpdateGlobalBoxPadding={setGlobalBoxPadding}
+                      manualZoneOverrides={manualZoneOverrides}
+                    />
+                  </div>
+                )}
+
+                {/* CARD 2: KINEMATICS VELOCITY PROFILE */}
+                {(analysisMode === 'kinematics' || analysisMode === 'duplex') && (
+                  <div className="bg-slate-900 rounded-2xl border border-slate-800 p-4 shadow-xl">
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center gap-2">
+                        <div className="p-1.5 bg-indigo-500/20 text-indigo-400 rounded-lg">
+                          <Activity size={14} />
+                        </div>
+                        <div>
+                          <h3 className="text-xs font-bold text-white">
+                            {selectedTrial ? `Профиль скорости пробы #${selectedTrial.trialId}` : 'Кинематические показатели'}
+                          </h3>
+                          <div className="text-[10px] text-slate-400">
+                            {selectedTrial
+                              ? `V peak: ${selectedTrial.kinematics?.metrics.peakVelocityPxS.toFixed(0) || 0} px/s • Пауз: ${selectedTrial.kinematics?.metrics.pauseCount || 0}`
+                              : `Ср. скорость: ${stats.avgKinSpeed.toFixed(1)} px/s • Выход: ${stats.outsideBoxTrialRatio.toFixed(0)}%`}
+                          </div>
+                        </div>
+                      </div>
+                      {selectedTrial && (
+                        <span className="text-[10px] text-slate-400 font-mono">
+                          {(selectedTrial.trial_time_ms / 1000).toFixed(1)} сек
+                        </span>
+                      )}
+                    </div>
+
+                    {selectedTrial ? (
+                      <div className="space-y-3">
+                        <div className="grid grid-cols-3 gap-2 text-[10px]">
+                          <div className="p-2 bg-slate-950 rounded-xl border border-slate-800">
+                            <span className="text-slate-500 uppercase block">V mean</span>
+                            <span className="font-bold text-white text-xs">
+                              {selectedTrial.kinematics?.metrics.meanVelocityPxS.toFixed(0) || 0} px/s
+                            </span>
+                          </div>
+                          <div className="p-2 bg-slate-950 rounded-xl border border-slate-800">
+                            <span className="text-slate-500 uppercase block">Паузы</span>
+                            <span className="font-bold text-amber-400 text-xs">
+                              {selectedTrial.kinematics?.metrics.pauseTimeS.toFixed(1) || 0} с
+                            </span>
+                          </div>
+                          <div className="p-2 bg-slate-950 rounded-xl border border-slate-800">
+                            <span className="text-slate-500 uppercase block">Вне 9 точек</span>
+                            <span className={`font-bold text-xs ${
+                              (selectedTrial.kinematics?.metrics.outsideBoxTimeMs || 0) > 0 ? 'text-rose-400' : 'text-emerald-400'
+                            }`}>
+                              {(selectedTrial.kinematics?.metrics.outsideBoxTimeMs || 0) > 0 ? 'ДА' : 'НЕТ'}
+                            </span>
+                          </div>
+                        </div>
+                        <KinematicsVelocityGraph kinematics={selectedTrial.kinematics} />
+                      </div>
+                    ) : (
+                      <div className="p-4 bg-slate-950 rounded-xl border border-dashed border-slate-800 text-center">
+                        <p className="text-xs text-slate-400">
+                          Кликните по любой пробе в ленте или логе, чтобы увидеть профиль скорости V(t)
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* CARD 3: PARTICIPANT SUMMARY & INFO */}
+                {activeSubject && (
+                  <div className="bg-slate-900 rounded-2xl border border-slate-800 p-4 shadow-xl space-y-3">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-xs font-bold text-white flex items-center gap-1.5">
+                        <User size={14} className="text-indigo-400" />
+                        <span>Данные испытуемого ({activeSubject.id})</span>
+                      </h3>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                      <div>
+                        <span className="text-[10px] text-slate-500 uppercase block mb-0.5">Фамилия</span>
+                        <input
+                          type="text"
+                          value={activeSubject.lastName || ""}
                           onChange={(e) => {
                             const val = e.target.value;
                             setSubjects(prev => prev.map(s => s.id === activeSubject.id ? { ...s, lastName: val } : s));
                           }}
                           placeholder="Фамилия"
-                          title="Фамилия испытуемого"
-                          className="w-1/2 bg-white/90 border border-slate-200 rounded-lg px-2.5 py-1 text-sm font-bold text-slate-700 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 placeholder:text-slate-300 shadow-sm"
+                          className="w-full bg-slate-800 text-white rounded-lg px-2.5 py-1 text-xs font-bold border border-slate-700 focus:outline-none focus:border-indigo-500"
                         />
-                        <input 
-                          type="text" 
-                          value={activeSubject.firstName || ""} 
+                      </div>
+                      <div>
+                        <span className="text-[10px] text-slate-500 uppercase block mb-0.5">Имя</span>
+                        <input
+                          type="text"
+                          value={activeSubject.firstName || ""}
                           onChange={(e) => {
                             const val = e.target.value;
                             setSubjects(prev => prev.map(s => s.id === activeSubject.id ? { ...s, firstName: val } : s));
                           }}
                           placeholder="Имя"
-                          title="Имя испытуемого"
-                          className="w-1/2 bg-white/90 border border-slate-200 rounded-lg px-2.5 py-1 text-sm font-bold text-slate-700 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 placeholder:text-slate-300 shadow-sm"
+                          className="w-full bg-slate-800 text-white rounded-lg px-2.5 py-1 text-xs font-bold border border-slate-700 focus:outline-none focus:border-indigo-500"
                         />
                       </div>
-                   </div>
-                 </div>
+                    </div>
 
-                 <div className="flex items-center gap-4 p-3 bg-indigo-50 rounded-2xl border border-indigo-100">
-                   <div className="p-2.5 bg-white rounded-xl text-indigo-600 shadow-sm"><Users size={20} /></div>
-                   <div className="flex-1">
-                     <p className="text-[10px] font-black uppercase text-indigo-400 tracking-wider">ГРУППА</p>
-                     <input 
-                       type="text" 
-                       value={subjectGroups[activeSubject.id] || ""} 
-                       onChange={(e) => setSubjectGroups(prev => ({...prev, [activeSubject.id]: e.target.value}))}
-                       placeholder="Введите название группы"
-                       className="w-full bg-transparent border-none p-0 text-sm font-bold text-indigo-900 focus:ring-0 placeholder:text-indigo-200"
-                     />
-                   </div>
-                 </div>
-                 
-                 <div className="grid grid-cols-1 gap-3">
-                   <div className="flex items-center justify-between p-3 bg-indigo-50 rounded-2xl border border-indigo-100">
-                     <div className="flex items-center gap-2">
-                        <Clock size={16} className="text-indigo-500" />
-                        <p className="text-[10px] font-black uppercase text-indigo-400 tracking-tight">Общее время</p>
-                     </div>
-                     <p className="text-sm font-black text-indigo-700">{stats.total_solution_time_ms.toFixed(0)} мс</p>
-                   </div>
-                   <div className="flex items-center justify-between p-3 bg-indigo-50 rounded-2xl border border-indigo-100">
-                      <div className="flex items-center gap-2">
-                         <Activity size={16} className="text-indigo-500" />
-                         <p className="text-[10px] font-black uppercase text-indigo-400 tracking-tight">Среднее время пробы</p>
-                      </div>
-                      <p className="text-sm font-black text-indigo-700">{stats.mean_trial_time_ms.toFixed(1)} мс</p>
-                   </div>
-                   <div className="flex items-center justify-between p-3 bg-slate-50 rounded-2xl border border-slate-100">
-                      <div className="flex items-center gap-2">
-                         <LayoutGrid size={16} className="text-slate-400" />
-                         <p className="text-[10px] font-black uppercase text-slate-400 tracking-tight">Число проб</p>
-                      </div>
-                      <p className="text-sm font-black text-slate-600">{stats.totalTrials}</p>
-                   </div>
-                   {/* Kinematic metrics when in kinematics or duplex mode */}
-                    {(analysisMode === 'kinematics' || analysisMode === 'duplex') && (
-                      <>
-                        <div className="flex items-center justify-between p-3 bg-amber-50 rounded-2xl border border-amber-100">
-                          <div className="flex items-center gap-2">
-                            <Zap size={16} className="text-amber-500" />
-                            <p className="text-[10px] font-black uppercase text-amber-500 tracking-tight">Ср. скорость (движение)</p>
-                          </div>
-                          <p className="text-sm font-black text-amber-700">{stats.avgKinSpeed.toFixed(1)} px/s</p>
-                        </div>
-                        <div className="flex items-center justify-between p-3 bg-amber-50 rounded-2xl border border-amber-100">
-                          <div className="flex items-center gap-2">
-                            <Zap size={16} className="text-amber-500" />
-                            <p className="text-[10px] font-black uppercase text-amber-500 tracking-tight">Макс. пик скорости</p>
-                          </div>
-                          <p className="text-sm font-black text-amber-700">{stats.maxKinPeak.toFixed(1)} px/s</p>
-                        </div>
-                        <div className="flex items-center justify-between p-3 bg-yellow-50 rounded-2xl border border-yellow-200">
-                          <div className="flex items-center gap-2">
-                            <Timer size={16} className="text-yellow-600" />
-                            <p className="text-[10px] font-black uppercase text-yellow-700 tracking-tight">Ср. время пауз / проба</p>
-                          </div>
-                          <p className="text-sm font-black text-yellow-800">{stats.avgPauseTimePerTrial.toFixed(2)} с</p>
-                        </div>
-                        <div className="flex items-center justify-between p-3 bg-orange-50 rounded-2xl border border-orange-200">
-                          <div className="flex items-center gap-2">
-                            <Target size={16} className="text-orange-500" />
-                            <p className="text-[10px] font-black uppercase text-orange-600 tracking-tight">Проб с выходом за рамку</p>
-                          </div>
-                          <p className="text-sm font-black text-orange-800">{stats.outsideBoxTrialRatio.toFixed(1)}%</p>
-                        </div>
-                      </>
-                    )}
+                    <div>
+                      <span className="text-[10px] text-slate-500 uppercase block mb-0.5">Экспериментальная группа</span>
+                      <input
+                        type="text"
+                        value={subjectGroups[activeSubject.id] || ""}
+                        onChange={(e) => setSubjectGroups(prev => ({...prev, [activeSubject.id]: e.target.value}))}
+                        placeholder="Название группы (Контроль, Подсказка, и т.д.)"
+                        className="w-full bg-slate-800 text-indigo-300 rounded-lg px-2.5 py-1 text-xs font-bold border border-slate-700 focus:outline-none focus:border-indigo-500 placeholder-slate-600"
+                      />
+                    </div>
 
-                    {/* Geometry metrics when in geometry or duplex mode */}
-                    {(analysisMode === 'geometry' || analysisMode === 'duplex') && (
-                      <div className="flex items-center justify-between p-3 bg-amber-50 rounded-2xl border border-amber-100">
-                         <div className="flex items-center gap-2">
-                            <Zap size={16} className="text-amber-500" />
-                            <p className="text-[10px] font-black uppercase text-amber-500 tracking-tight">Тип 1-й линии (1-я проба)</p>
-                         </div>
-                         <p className="text-sm font-black text-amber-700 uppercase tracking-tighter">{stats.firstTrialFirstLineType}</p>
+                    <div className="grid grid-cols-3 gap-2 text-[10px]">
+                      <div className="p-2 bg-slate-950 rounded-xl border border-slate-800">
+                        <span className="text-slate-500 uppercase block">Время</span>
+                        <span className="font-bold text-white text-xs">{(stats.total_solution_time_ms / 1000).toFixed(0)}с</span>
                       </div>
-                    )}
-                   <div className="flex items-center justify-between p-3 bg-emerald-50 rounded-2xl border border-emerald-100">
-                      <div className="flex items-center gap-2">
-                         <CheckSquare size={16} className="text-emerald-500" />
-                         <p className="text-[10px] font-black uppercase text-emerald-500 tracking-tight">Линии точка-точка</p>
+                      <div className="p-2 bg-slate-950 rounded-xl border border-slate-800">
+                        <span className="text-slate-500 uppercase block">Ср. проба</span>
+                        <span className="font-bold text-white text-xs">{(stats.mean_trial_time_ms / 1000).toFixed(1)}с</span>
                       </div>
-                      <p className="text-sm font-black text-emerald-700">{stats.linesBothEndsInNodes}</p>
-                   </div>
-                   <div className="flex items-center justify-between p-3 bg-rose-50 rounded-2xl border border-rose-100">
-                      <div className="flex items-center gap-2">
-                         <Ban size={16} className="text-rose-500" />
-                         <p className="text-[10px] font-black uppercase text-rose-500 tracking-tight">Линии за пределами</p>
+                      <div className="p-2 bg-slate-950 rounded-xl border border-slate-800">
+                        <span className="text-slate-500 uppercase block">Проб</span>
+                        <span className="font-bold text-indigo-400 text-xs">{stats.totalTrials}</span>
                       </div>
-                      <p className="text-sm font-black text-rose-700">{stats.linesAnyEndOutside}</p>
-                   </div>
-                   <div className="flex items-center justify-between p-3 bg-indigo-50 rounded-2xl border border-indigo-100">
-                      <div className="flex items-center gap-2">
-                         <Ruler size={16} className="text-indigo-500" />
-                         <p className="text-[10px] font-black uppercase text-indigo-500 tracking-tight">Ср. длина (все)</p>
-                      </div>
-                      <p className="text-sm font-black text-indigo-700">{stats.avgAllLinesLength.toFixed(1)} px</p>
-                   </div>
-                   <div className="flex items-center justify-between p-3 bg-rose-50 rounded-2xl border border-rose-100">
-                      <div className="flex items-center gap-2">
-                         <Ruler size={16} className="text-rose-500" />
-                         <p className="text-[10px] font-black uppercase text-rose-500 tracking-tight">Ср. длина (за пределами)</p>
-                      </div>
-                      <p className="text-sm font-black text-rose-700">{stats.avgOutsideLinesLength.toFixed(1)} px</p>
-                   </div>
-                 </div>
+                    </div>
 
-                 <div className="grid grid-cols-2 gap-3">
-                   <div className="p-3 bg-slate-50 rounded-2xl">
-                     <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Возраст</p>
-                     <p className="text-sm font-bold text-slate-700">{activeSubject.age}</p>
-                   </div>
-                   <div className="p-3 bg-slate-50 rounded-2xl">
-                     <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Пол</p>
-                     <p className="text-sm font-bold text-slate-700">{activeSubject.gender}</p>
-                   </div>
-                    {activeSubject.solvedBefore && (
-                      <div className="p-3 bg-slate-50 rounded-2xl">
-                        <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Решал ранее</p>
-                        <p className="text-sm font-bold text-slate-700">{activeSubject.solvedBefore}</p>
+                    <div className="grid grid-cols-2 gap-2 text-[10px]">
+                      <div className="p-2 bg-slate-950 rounded-xl border border-slate-800">
+                        <span className="text-slate-500 uppercase block">Возраст / Пол</span>
+                        <span className="font-bold text-slate-300 text-xs">{activeSubject.age || '—'} / {activeSubject.gender || '—'}</span>
                       </div>
-                    )}
-                    {activeSubject.insight && (
-                      <div className="p-3 bg-slate-50 rounded-2xl">
-                        <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Инсайт</p>
-                        <p className="text-sm font-bold text-slate-700">{activeSubject.insight}</p>
+                      <div className="p-2 bg-slate-950 rounded-xl border border-slate-800">
+                        <span className="text-slate-500 uppercase block">Инсайт / Решал</span>
+                        <span className="font-bold text-slate-300 text-xs">{activeSubject.insight || '—'} / {activeSubject.solvedBefore || '—'}</span>
                       </div>
-                    )}
-                    {activeSubject.totalTaskTime !== undefined && (
-                      <div className="p-3 bg-indigo-50/50 rounded-2xl col-span-2 border border-indigo-100/50">
-                        <p className="text-[10px] font-black uppercase text-indigo-500 tracking-wider flex items-center gap-1">
-                          <Timer size={12} /> Общее время задачи (totalTaskTime)
-                        </p>
-                        <p className="text-sm font-bold text-indigo-900">{activeSubject.totalTaskTime} с</p>
-                      </div>
-                    )}
-                    {activeSubject.surveyScales && Object.keys(activeSubject.surveyScales).length > 0 && (
-                      <div className="p-3 bg-slate-50 rounded-2xl col-span-2 space-y-2">
-                        <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Шкалы опросника</p>
-                        <div className="grid grid-cols-2 gap-1.5 text-xs">
-                          {Object.entries(activeSubject.surveyScales).map(([name, val]) => (
-                            <div key={name} className="flex justify-between bg-white px-2 py-1 rounded-lg border border-slate-100">
-                              <span className="text-slate-600 truncate">{name}:</span>
-                              <span className="font-bold text-slate-800 ml-1">{val}</span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                   <div className="p-3 bg-slate-50 rounded-2xl col-span-2">
-                     <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Опыт (из CSV)</p>
-                     <p className="text-sm font-bold text-slate-700">{activeSubject.experience}</p>
-                   </div>
-                 </div>
-               </div>
-             </div>
-          )}
-        </div>
-
-        <div className="xl:col-span-6 lg:col-span-8 space-y-6">
-          <div className="bg-white p-8 rounded-[32px] shadow-xl border border-slate-100 animate-in fade-in slide-in-from-right-4">
-            <h2 className="text-lg font-bold mb-6 flex items-center gap-2 text-slate-700"><Settings size={20} className="text-blue-500" /> Настройки анализа</h2>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-              <div className="space-y-3">
-                <div className="flex justify-between items-center">
-                  <label className="text-[10px] font-black uppercase text-slate-400 tracking-wider flex items-center gap-2">
-                    <RotateCcw size={12} /> Угол поворота (градусы)
-                  </label>
-                  <span className="text-xs font-black text-blue-600 bg-blue-50 px-2 py-1 rounded-lg">{angleThreshold}°</span>
-                </div>
-                <input 
-                  type="range" 
-                  min="5" 
-                  max="90" 
-                  step="1"
-                  value={angleThreshold} 
-                  onChange={(e) => setAngleThreshold(parseInt(e.target.value))}
-                  className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-blue-600"
-                />
-                <div className="flex justify-between text-[9px] text-slate-300 font-bold uppercase">
-                  <span>Чувствительно</span>
-                  <span>Грубо</span>
-                </div>
-              </div>
-              <div className="space-y-3">
-                <div className="flex justify-between items-center">
-                  <label className="text-[10px] font-black uppercase text-slate-400 tracking-wider flex items-center gap-2">
-                    <Ruler size={12} /> Мин. длина линии (px)
-                  </label>
-                  <span className="text-xs font-black text-blue-600 bg-blue-50 px-2 py-1 rounded-lg">{minLineLength}</span>
-                </div>
-                <input 
-                  type="range" 
-                  min="10" 
-                  max="500" 
-                  step="5"
-                  value={minLineLength} 
-                  onChange={(e) => setMinLineLength(parseInt(e.target.value))}
-                  className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-blue-600"
-                />
-                <div className="flex justify-between text-[9px] text-slate-300 font-bold uppercase">
-                  <span>Короткие</span>
-                  <span>Длинные</span>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="bg-white rounded-[40px] shadow-2xl border border-slate-100 overflow-hidden relative group">
-            {/* Canvas Zoom & Fit Toolbar */}
-            <div className="absolute top-4 right-4 z-20 flex items-center gap-1.5 bg-white/95 backdrop-blur-md p-1.5 rounded-2xl shadow-lg border border-slate-200/80">
-              <button 
-                onClick={() => { setAutoFit(false); setZoom(z => Math.max(0.15, +(z * 0.85).toFixed(2))); }} 
-                title="Уменьшить масштаб (-)"
-                className="p-2 rounded-xl hover:bg-slate-100 text-slate-600 transition-colors"
-              >
-                <ZoomOut size={16} />
-              </button>
-              <span className="text-xs font-bold text-slate-700 px-1 min-w-[48px] text-center select-none">
-                {Math.round(currentScale * 100)}%
-              </span>
-              <button 
-                onClick={() => { setAutoFit(false); setZoom(z => Math.min(5, +(z * 1.15).toFixed(2))); }} 
-                title="Увеличить масштаб (+)"
-                className="p-2 rounded-xl hover:bg-slate-100 text-slate-600 transition-colors"
-              >
-                <ZoomIn size={16} />
-              </button>
-              <div className="w-[1px] h-4 bg-slate-200 mx-0.5" />
-              <button 
-                onClick={() => { setAutoFit(true); setZoom(1); setPanOffset({ x: 0, y: 0 }); }} 
-                title="Вписать пробу в холст (Auto-fit)"
-                className={`p-2 rounded-xl transition-colors flex items-center gap-1 text-xs font-bold ${
-                  autoFit ? 'bg-blue-50 text-blue-600' : 'hover:bg-slate-100 text-slate-600'
-                }`}
-              >
-                <Maximize size={16} />
-                <span className="hidden sm:inline">Авто</span>
-              </button>
-              <button 
-                onClick={() => { setAutoFit(false); setZoom(1); setPanOffset({ x: 0, y: 0 }); }} 
-                title="Сброс масштаба 100%"
-                className="p-2 rounded-xl hover:bg-slate-100 text-slate-600 text-xs font-bold transition-colors"
-              >
-                1:1
-              </button>
-            </div>
-
-            <canvas 
-              ref={canvasRef} 
-              width={CANVAS_SIZE} 
-              height={CANVAS_SIZE} 
-              className={`w-full aspect-square bg-white ${
-                isCalibrating 
-                  ? (isDraggingGrid ? 'cursor-grabbing' : 'cursor-grab') 
-                  : (isPanning ? 'cursor-grabbing' : (currentScale > 1 || !autoFit ? 'cursor-grab' : 'cursor-default'))
-              }`}
-              onMouseDown={handleMainCanvasMouseDown}
-              onMouseMove={handleMainCanvasMouseMove}
-              onMouseUp={handleMainCanvasMouseUp}
-              onMouseLeave={handleMainCanvasMouseUp}
-              onWheel={handleMainCanvasWheel}
-            />
-            {selectedTrialId !== null && (
-              <div className="absolute bottom-10 left-1/2 -translate-x-1/2 bg-white/95 backdrop-blur-md p-4 rounded-3xl shadow-2xl border border-slate-100 flex items-center gap-6 animate-in fade-in slide-in-from-bottom-4">
-                <div className="flex flex-col">
-                  <span className="text-[10px] font-bold text-slate-400 uppercase">Просмотр пробы</span>
-                  <span className="text-lg font-black text-slate-900 leading-tight">#{selectedTrialId}</span>
-                  {selectedTrial && (
-                    <span className="text-[10px] font-black text-blue-500 uppercase mt-0.5 flex items-center gap-1">
-                      <Clock size={10} /> {selectedTrial.trial_time_ms.toFixed(0)} мс
-                    </span>
-                  )}
-                </div>
-                <div className="flex items-center gap-2">
-                  <button onClick={() => navigateTrial('prev')} className="p-2 bg-slate-50 rounded-xl hover:bg-slate-100 text-slate-600 transition-colors"><ChevronLeft size={20} /></button>
-                  <button onClick={() => navigateTrial('next')} className="p-2 bg-slate-50 rounded-xl hover:bg-slate-100 text-slate-600 transition-colors"><ChevronRight size={20} /></button>
-                  <button onClick={() => setSelectedTrialId(null)} className="ml-2 p-2 bg-red-50 text-red-600 rounded-xl hover:bg-red-100 transition-colors"><X size={20} /></button>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Kinematics Section when in kinematics or duplex mode */}
-          {(analysisMode === 'kinematics' || analysisMode === 'duplex') && (
-            <div className="bg-white p-6 md:p-8 rounded-[32px] shadow-xl border border-slate-100 animate-in fade-in duration-200">
-              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 mb-6 pb-4 border-b border-slate-100">
-                <div className="flex items-center gap-3">
-                  <div className="p-2.5 bg-amber-50 text-amber-600 rounded-2xl">
-                    <Zap size={22} />
+                    </div>
                   </div>
-                  <div>
-                    <h2 className="text-lg font-black text-slate-900 tracking-tight flex items-center gap-2">
-                      Кинематика движений (M.O.G.N.U.)
-                      {selectedTrial && (
-                        <span className="text-xs px-2.5 py-1 bg-amber-100 text-amber-800 rounded-xl font-bold">
-                          Проба #{selectedTrial.trialId}
-                        </span>
-                      )}
-                    </h2>
-                    <p className="text-xs text-slate-400 font-medium">
-                      {selectedTrial 
-                        ? 'Профиль тангенциальной скорости V(t), паузы размышления и фазовые пики' 
-                        : 'Сводные кинематические показатели испытуемого по всем пробам'}
-                    </p>
-                  </div>
-                </div>
-                {selectedTrial && (
-                  <button
-                    onClick={() => setSelectedTrialId(null)}
-                    className="text-xs font-bold text-slate-400 hover:text-slate-600 px-3 py-1.5 rounded-xl bg-slate-50 hover:bg-slate-100 transition-colors"
-                  >
-                    Свернуть в обзор
-                  </button>
                 )}
+
+                {/* CARD 4: SETTINGS */}
+                <div className="bg-slate-900 rounded-2xl border border-slate-800 p-4 shadow-xl space-y-3">
+                  <h3 className="text-xs font-bold text-slate-300 flex items-center gap-1.5">
+                    <Settings size={14} className="text-indigo-400" />
+                    <span>Параметры сегментации линий</span>
+                  </h3>
+                  <div className="grid grid-cols-2 gap-3 text-xs">
+                    <div>
+                      <div className="flex justify-between text-[10px] text-slate-400 mb-1">
+                        <span>Угол поворота</span>
+                        <span className="text-indigo-400 font-bold">{angleThreshold}°</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="5"
+                        max="90"
+                        step="1"
+                        value={angleThreshold}
+                        onChange={(e) => setAngleThreshold(parseInt(e.target.value))}
+                        className="w-full accent-indigo-500 cursor-pointer"
+                      />
+                    </div>
+                    <div>
+                      <div className="flex justify-between text-[10px] text-slate-400 mb-1">
+                        <span>Мин. длина (px)</span>
+                        <span className="text-indigo-400 font-bold">{minLineLength}</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="10"
+                        max="500"
+                        step="5"
+                        value={minLineLength}
+                        onChange={(e) => setMinLineLength(parseInt(e.target.value))}
+                        className="w-full accent-indigo-500 cursor-pointer"
+                      />
+                    </div>
+                  </div>
+                </div>
+
               </div>
-
-              {selectedTrial ? (
-                <div className="space-y-6">
-                  {/* Trial Metric Badges */}
-                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-                    <div className="p-3 bg-amber-50/70 rounded-2xl border border-amber-100">
-                      <span className="text-[9px] font-black uppercase text-amber-600 block">V mean</span>
-                      <span className="text-base font-black text-amber-900">
-                        {selectedTrial.kinematics?.metrics.meanVelocityPxS.toFixed(1) || '0.0'}
-                      </span>
-                      <span className="text-[9px] text-amber-600/80 font-bold ml-1">px/s</span>
-                    </div>
-
-                    <div className="p-3 bg-amber-50/70 rounded-2xl border border-amber-100">
-                      <span className="text-[9px] font-black uppercase text-amber-600 block">V peak</span>
-                      <span className="text-base font-black text-amber-900">
-                        {selectedTrial.kinematics?.metrics.peakVelocityPxS.toFixed(1) || '0.0'}
-                      </span>
-                      <span className="text-[9px] text-amber-600/80 font-bold ml-1">px/s</span>
-                    </div>
-
-                    <div className="p-3 bg-yellow-50/70 rounded-2xl border border-yellow-200">
-                      <span className="text-[9px] font-black uppercase text-yellow-700 block">Паузы</span>
-                      <span className="text-base font-black text-yellow-900">
-                        {selectedTrial.kinematics?.metrics.pauseCount || 0}
-                      </span>
-                      <span className="text-[9px] text-yellow-700 font-bold ml-1">
-                        ({selectedTrial.kinematics?.metrics.pauseTimeS.toFixed(1) || 0} с)
-                      </span>
-                    </div>
-
-                    <div className="p-3 bg-indigo-50/70 rounded-2xl border border-indigo-100">
-                      <span className="text-[9px] font-black uppercase text-indigo-600 block">Движение</span>
-                      <span className="text-base font-black text-indigo-900">
-                        {selectedTrial.kinematics?.metrics.movementTimeS.toFixed(1) || '0.0'}
-                      </span>
-                      <span className="text-[9px] text-indigo-600 font-bold ml-1">с</span>
-                    </div>
-
-                    <div className={`p-3 rounded-2xl border ${
-                      (selectedTrial.kinematics?.metrics.outsideBoxTimeMs || 0) > 0 
-                        ? 'bg-rose-50 border-rose-200 text-rose-900' 
-                        : 'bg-slate-50 border-slate-200 text-slate-700'
-                    }`}>
-                      <span className="text-[9px] font-black uppercase block opacity-70">Вне 9 точек</span>
-                      <span className="text-base font-black">
-                        {(selectedTrial.kinematics?.metrics.outsideBoxTimeMs || 0) > 0 ? 'ДА' : 'НЕТ'}
-                      </span>
-                      {(selectedTrial.kinematics?.metrics.outsideBoxTimeMs || 0) > 0 && (
-                        <span className="text-[9px] font-bold ml-1">
-                          ({selectedTrial.kinematics?.metrics.outsideBoxTimeS.toFixed(1)} с)
-                        </span>
-                      )}
-                    </div>
-
-                    <div className="p-3 bg-slate-50 rounded-2xl border border-slate-100">
-                      <span className="text-[9px] font-black uppercase text-slate-500 block">Штрихов</span>
-                      <span className="text-base font-black text-slate-800">
-                        {selectedTrial.kinematics?.metrics.segmentCount || 0}
-                      </span>
-                      <span className="text-[9px] text-slate-400 font-bold ml-1">сегм.</span>
-                    </div>
-                  </div>
-
-                  {/* Velocity Graph Canvas */}
-                  <KinematicsVelocityGraph kinematics={selectedTrial.kinematics} />
-
-                  {/* Segments / Strokes Breakdown */}
-                  {selectedTrial.kinematics?.segments && selectedTrial.kinematics.segments.length > 0 && (
-                    <div className="space-y-2">
-                      <div className="flex justify-between items-center">
-                        <h4 className="text-xs font-black uppercase tracking-wider text-slate-400">
-                          Сегменты движения (штрихи)
-                        </h4>
-                        <span className="text-[10px] text-slate-400 font-medium">
-                          Всего {selectedTrial.kinematics.segments.length} сегментов
-                        </span>
-                      </div>
-                      <div className="max-h-48 overflow-y-auto custom-scrollbar border border-slate-100 rounded-2xl">
-                        <table className="w-full text-left text-[11px]">
-                          <thead className="bg-slate-50 text-slate-400 uppercase text-[9px] sticky top-0">
-                            <tr>
-                              <th className="py-2.5 px-3">#</th>
-                              <th className="py-2.5 px-3">Старт (с)</th>
-                              <th className="py-2.5 px-3">Конец (с)</th>
-                              <th className="py-2.5 px-3">Длит-ть</th>
-                              <th className="py-2.5 px-3">V max</th>
-                              <th className="py-2.5 px-3">V mean</th>
-                              <th className="py-2.5 px-3">Угол (°)</th>
-                              <th className="py-2.5 px-3">Рамка</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-slate-100">
-                            {selectedTrial.kinematics.segments.map((seg, sIdx) => (
-                              <tr key={sIdx} className="hover:bg-slate-50/70 transition-colors">
-                                <td className="py-2 px-3 font-bold text-slate-700">#{sIdx + 1}</td>
-                                <td className="py-2 px-3 text-slate-500">{(seg.tStart / 1000).toFixed(2)} с</td>
-                                <td className="py-2 px-3 text-slate-500">{(seg.tEnd / 1000).toFixed(2)} с</td>
-                                <td className="py-2 px-3 font-medium text-slate-800">{Math.round(seg.durationMs)} мс</td>
-                                <td className="py-2 px-3 font-bold text-amber-600">{Math.round(seg.peakVelocityPxS)} px/s</td>
-                                <td className="py-2 px-3 text-slate-600">{Math.round(seg.meanVelocityPxS)} px/s</td>
-                                <td className="py-2 px-3 text-slate-500">{Math.round(seg.angleDeg)}°</td>
-                                <td className="py-2 px-3">
-                                  <span className={`px-2 py-0.5 rounded-full text-[9px] font-bold ${
-                                    seg.isOutsideBox 
-                                      ? 'bg-rose-100 text-rose-700' 
-                                      : 'bg-slate-100 text-slate-500'
-                                  }`}>
-                                    {seg.isOutsideBox ? 'ВНЕ' : 'ВНУТРИ'}
-                                  </span>
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <div className="space-y-4">
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                    <div className="p-4 bg-amber-50/70 rounded-2xl border border-amber-100">
-                      <span className="text-[10px] font-black uppercase text-amber-600 block mb-1">Ср. скорость движения</span>
-                      <span className="text-xl font-black text-amber-900">{stats.avgKinSpeed.toFixed(1)}</span>
-                      <span className="text-xs text-amber-700 font-bold ml-1">px/s</span>
-                    </div>
-
-                    <div className="p-4 bg-amber-50/70 rounded-2xl border border-amber-100">
-                      <span className="text-[10px] font-black uppercase text-amber-600 block mb-1">Макс. пик скорости</span>
-                      <span className="text-xl font-black text-amber-900">{stats.maxKinPeak.toFixed(1)}</span>
-                      <span className="text-xs text-amber-700 font-bold ml-1">px/s</span>
-                    </div>
-
-                    <div className="p-4 bg-yellow-50/70 rounded-2xl border border-yellow-200">
-                      <span className="text-[10px] font-black uppercase text-yellow-700 block mb-1">Ср. время пауз / проба</span>
-                      <span className="text-xl font-black text-yellow-900">{stats.avgPauseTimePerTrial.toFixed(2)}</span>
-                      <span className="text-xs text-yellow-700 font-bold ml-1">с</span>
-                    </div>
-
-                    <div className="p-4 bg-orange-50/70 rounded-2xl border border-orange-200">
-                      <span className="text-[10px] font-black uppercase text-orange-700 block mb-1">Выход за рамку 9 точек</span>
-                      <span className="text-xl font-black text-orange-900">{stats.outsideBoxTrialRatio.toFixed(1)}</span>
-                      <span className="text-xs text-orange-700 font-bold ml-1">% проб</span>
-                    </div>
-                  </div>
-
-                  <div className="p-4 bg-slate-50 rounded-2xl border border-dashed border-slate-200 text-center">
-                    <p className="text-xs text-slate-500 font-medium">
-                      💡 Кликните по любой пробе в логе или на холсте, чтобы увидеть её динамический график V(t), паузы размышления и штрихи
-                    </p>
-                  </div>
-                </div>
-              )}
             </div>
           )}
 
-          {processedData.length > 0 && (analysisMode === 'geometry' || analysisMode === 'duplex') && (
-            <>
+          {/* ================= TAB 2: ГЕОМЕТРИЯ & СЕГМЕНТЫ ================= */}
+          {activeTab === 'geometry' && (
+            <div className="flex-1 overflow-y-auto custom-scrollbar p-5 space-y-5 bg-slate-950 select-none">
+              {/* Phased Analysis if enabled */}
               {usePhasedMode && stats.phases && (
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   {(['beginning', 'middle', 'end'] as const).map(phaseKey => {
                     const phase = stats.phases![phaseKey];
-                    const titles = { beginning: 'Начало решения', middle: 'Середина решения', end: 'Конец решения' };
-                    const colors = { beginning: 'blue', middle: 'emerald', end: 'amber' };
-                    const bgColors = { beginning: 'bg-blue-50', middle: 'bg-emerald-50', end: 'bg-amber-50' };
-                    const textColors = { beginning: 'text-blue-600', middle: 'text-emerald-600', end: 'text-amber-600' };
-                    const borderColors = { beginning: 'border-blue-100', middle: 'border-emerald-100', end: 'border-amber-100' };
+                    const titles = { beginning: 'Начало решения (Этап 1)', middle: 'Середина решения (Этап 2)', end: 'Конец решения (Этап 3)' };
+                    const accentColors = { beginning: 'text-blue-400 border-blue-500/30', middle: 'text-emerald-400 border-emerald-500/30', end: 'text-amber-400 border-amber-500/30' };
 
                     return (
-                      <div key={phaseKey} className={`p-6 rounded-[32px] border ${borderColors[phaseKey]} ${bgColors[phaseKey]} shadow-sm`}>
-                        <h3 className={`text-xs font-black uppercase tracking-widest mb-4 ${textColors[phaseKey]}`}>{titles[phaseKey]}</h3>
-                        <div className="space-y-4">
-                           <div className="flex justify-between items-center">
-                              <span className="text-[10px] font-bold text-slate-500 uppercase">Проб</span>
-                              <span className="text-xs font-black text-slate-700">{phase.totalTrials}</span>
-                           </div>
-                           <div className="flex justify-between items-center">
-                              <span className="text-[10px] font-bold text-slate-500 uppercase">Среднее время</span>
-                              <span className="text-xs font-black text-slate-700">{phase.mean_trial_time_ms.toFixed(0)} мс</span>
-                           </div>
-                           <div className="flex justify-between items-center">
-                              <span className="text-[10px] font-bold text-slate-500 uppercase">Точка-точка</span>
-                              <span className="text-xs font-black text-slate-700">{phase.linesBothEndsInNodes}</span>
-                           </div>
-                           <div className="flex justify-between items-center">
-                              <span className="text-[10px] font-bold text-slate-500 uppercase">Вне точек</span>
-                              <span className="text-xs font-black text-slate-700">{phase.linesAnyEndOutside}</span>
-                            </div>
-                            <div className="flex justify-between items-center">
-                              <span className="text-[10px] font-bold text-slate-500 uppercase">Ср. длина (все)</span>
-                              <span className="text-xs font-black text-slate-700">{phase.avgAllLinesLength.toFixed(1)} px</span>
-                            </div>
-                            <div className="flex justify-between items-center">
-                              <span className="text-[10px] font-bold text-slate-500 uppercase">Ср. длина (вне)</span>
-                              <span className="text-xs font-black text-slate-700">{phase.avgOutsideLinesLength.toFixed(1)} px</span>
-                           </div>
-                           <div className="pt-2 border-t border-slate-200">
-                              <span className="text-[9px] font-black uppercase text-slate-400 tracking-tighter block mb-2">Типы линий</span>
-                              <div className="space-y-1">
-                                 {Object.entries(phase.lineTypeCounts).sort((a: [string, any], b: [string, any]) => (b[1] as number) - (a[1] as number)).slice(0, 4).map(([type, count]) => (
-                                   <div key={type} className="flex justify-between items-center bg-white/50 px-2 py-1 rounded-lg">
-                                      <span className="text-[9px] font-bold text-slate-600 uppercase">{type}</span>
-                                      <span className="text-[9px] font-black text-slate-900">{count}</span>
-                                   </div>
-                                 ))}
-                              </div>
-                           </div>
+                      <div key={phaseKey} className={`bg-slate-900 p-4 rounded-2xl border shadow-xl space-y-3 ${accentColors[phaseKey]}`}>
+                        <h4 className="text-xs font-black uppercase tracking-wider text-white flex items-center justify-between">
+                          <span>{titles[phaseKey]}</span>
+                          <span className="text-[10px] font-mono text-slate-400">{phase.totalTrials} проб</span>
+                        </h4>
+                        <div className="grid grid-cols-2 gap-2 text-xs">
+                          <div className="p-2 bg-slate-950 rounded-xl border border-slate-800">
+                            <span className="text-[10px] text-slate-500 block">Ср. время</span>
+                            <span className="font-bold text-white">{phase.mean_trial_time_ms.toFixed(0)} мс</span>
+                          </div>
+                          <div className="p-2 bg-slate-950 rounded-xl border border-slate-800">
+                            <span className="text-[10px] text-slate-500 block">Точка-точка</span>
+                            <span className="font-bold text-emerald-400">{phase.linesBothEndsInNodes}</span>
+                          </div>
+                          <div className="p-2 bg-slate-950 rounded-xl border border-slate-800">
+                            <span className="text-[10px] text-slate-500 block">Вне точек</span>
+                            <span className="font-bold text-rose-400">{phase.linesAnyEndOutside}</span>
+                          </div>
+                          <div className="p-2 bg-slate-950 rounded-xl border border-slate-800">
+                            <span className="text-[10px] text-slate-500 block">Ср. длина (все)</span>
+                            <span className="font-bold text-indigo-300">{phase.avgAllLinesLength.toFixed(1)} px</span>
+                          </div>
                         </div>
                       </div>
                     );
@@ -2536,384 +3190,422 @@ const App: React.FC = () => {
                 </div>
               )}
 
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-              <div className="bg-white p-8 rounded-[32px] shadow-xl border border-slate-100">
-                <div className="flex justify-between items-center mb-6">
-                  <h2 className="text-lg font-bold flex items-center gap-2"><BarChart3 size={20} className="text-blue-500" /> Типы линий</h2>
-                  {(filterTypes.size > 0 || filterStartNode !== null || filterFinishNode !== null || filterOverridesOnly) && <button onClick={resetFilters} className="text-[10px] font-bold text-blue-500 hover:underline">Сброс</button>}
-                </div>
-                <div className="space-y-1.5">
-                  {Object.entries(stats.lineTypeCounts).sort((a,b) => (b[1] as number) - (a[1] as number)).map(([type, count]) => {
-                    const isSelected = filterTypes.has(type);
-                    return (
-                      <div 
-                        key={type} 
-                        onClick={() => toggleFilterType(type)} 
-                        className={`group flex justify-between items-center p-2.5 rounded-xl cursor-pointer transition-all border ${isSelected ? 'bg-blue-600 border-blue-700 text-white shadow-lg' : 'bg-slate-50 border-transparent hover:bg-slate-100 text-slate-600'}`}
-                      >
-                        <div className="flex items-center gap-3">
-                          {isSelected ? <CheckSquare size={16} /> : <Square size={16} className="text-slate-300 group-hover:text-slate-400" />}
-                          <span className="text-[10px] font-bold uppercase tracking-wide">{type}</span>
+              {/* Filtering & Counts Grids */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {/* 1. Line Types Filter */}
+                <div className="bg-slate-900 p-4 rounded-2xl border border-slate-800 shadow-xl space-y-3">
+                  <div className="flex justify-between items-center">
+                    <h3 className="text-xs font-bold text-white flex items-center gap-1.5">
+                      <BarChart3 size={14} className="text-indigo-400" />
+                      <span>Типы линий</span>
+                    </h3>
+                    {(filterTypes.size > 0 || filterStartNode !== null || filterFinishNode !== null || filterOverridesOnly) && (
+                      <button onClick={resetFilters} className="text-[10px] text-indigo-400 hover:underline">
+                        Сбросить фильтры
+                      </button>
+                    )}
+                  </div>
+                  <div className="space-y-1.5 max-h-52 overflow-y-auto custom-scrollbar">
+                    {Object.entries(stats.lineTypeCounts).sort((a,b) => (b[1] as number) - (a[1] as number)).map(([type, count]) => {
+                      const isSelected = filterTypes.has(type);
+                      return (
+                        <div
+                          key={type}
+                          onClick={() => toggleFilterType(type)}
+                          className={`flex justify-between items-center p-2 rounded-xl cursor-pointer text-xs transition-all border ${
+                            isSelected
+                              ? 'bg-indigo-600 text-white border-indigo-500 font-bold'
+                              : 'bg-slate-800/60 hover:bg-slate-800 text-slate-300 border-slate-800'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2">
+                            {isSelected ? <CheckSquare size={13} /> : <Square size={13} className="text-slate-500" />}
+                            <span className="capitalize">{type}</span>
+                          </div>
+                          <span className="font-mono opacity-80">{count}</span>
                         </div>
-                        <span className={`text-xs font-black ${isSelected ? 'text-white' : 'text-slate-400'}`}>{count}</span>
-                      </div>
-                    );
-                  })}
+                      );
+                    })}
+                  </div>
                 </div>
-                <div className="pt-4 mt-4 border-t border-slate-50">
-                  <button onClick={() => setFilterOverridesOnly(!filterOverridesOnly)} className={`w-full flex justify-between items-center p-3 rounded-2xl transition-all ${filterOverridesOnly ? 'bg-red-500 text-white shadow-lg' : 'bg-slate-50 text-slate-600 hover:bg-slate-100'}`}>
-                    <span className="text-[10px] font-black uppercase">Исключенные</span>
-                    <span className="text-xs font-black">{stats.totalOverrides}</span>
-                  </button>
+
+                {/* 2. Start Nodes */}
+                <div className="bg-slate-900 p-4 rounded-2xl border border-slate-800 shadow-xl space-y-3">
+                  <div className="flex justify-between items-center">
+                    <h3 className="text-xs font-bold text-white flex items-center gap-1.5">
+                      <Target size={14} className="text-rose-400" />
+                      <span>Точки старта (1-9)</span>
+                    </h3>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    {[1,2,3,4,5,6,7,8,9].map(num => (
+                      <button
+                        key={num}
+                        onClick={() => setFilterStartNode(filterStartNode === num ? null : num)}
+                        className={`p-2.5 rounded-xl flex flex-col items-center border transition-all ${
+                          filterStartNode === num
+                            ? 'bg-rose-600 text-white border-rose-500 shadow-md shadow-rose-600/30'
+                            : 'bg-slate-800/60 hover:bg-slate-800 text-slate-300 border-slate-800'
+                        }`}
+                      >
+                        <span className="text-[9px] opacity-60">Узел #{num}</span>
+                        <span className="text-sm font-black mt-0.5">{stats.startNodeCounts[num] || 0}</span>
+                      </button>
+                    ))}
+                  </div>
                 </div>
-              </div>
-              
-              <div className="bg-white p-8 rounded-[32px] shadow-xl border border-slate-100">
-                <h2 className="text-lg font-bold mb-6 flex items-center gap-2"><Target size={20} className="text-red-500" /> Точки старта</h2>
-                <div className="grid grid-cols-3 gap-2">
-                  {[1,2,3,4,5,6,7,8,9].map(num => (
-                    <div key={num} onClick={() => setFilterStartNode(filterStartNode === num ? null : num)} className={`p-3 rounded-xl flex flex-col items-center border cursor-pointer transition-all ${filterStartNode === num ? 'bg-slate-900 text-white shadow-lg' : 'bg-slate-50 border-transparent hover:border-slate-200'}`}>
-                      <span className="text-[8px] font-bold opacity-50 mb-1">{num}</span>
-                      <span className="text-lg font-black">{stats.startNodeCounts[num] || 0}</span>
-                    </div>
-                  ))}
+
+                {/* 3. Finish Nodes */}
+                <div className="bg-slate-900 p-4 rounded-2xl border border-slate-800 shadow-xl space-y-3">
+                  <div className="flex justify-between items-center">
+                    <h3 className="text-xs font-bold text-white flex items-center gap-1.5">
+                      <Flag size={14} className="text-emerald-400" />
+                      <span>Точки финиша (1-9)</span>
+                    </h3>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    {[1,2,3,4,5,6,7,8,9].map(num => (
+                      <button
+                        key={num}
+                        onClick={() => setFilterFinishNode(filterFinishNode === num ? null : num)}
+                        className={`p-2.5 rounded-xl flex flex-col items-center border transition-all ${
+                          filterFinishNode === num
+                            ? 'bg-emerald-600 text-white border-emerald-500 shadow-md shadow-emerald-600/30'
+                            : 'bg-slate-800/60 hover:bg-slate-800 text-slate-300 border-slate-800'
+                        }`}
+                      >
+                        <span className="text-[9px] opacity-60">Узел #{num}</span>
+                        <span className="text-sm font-black mt-0.5">{stats.finishNodeCounts[num] || 0}</span>
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
 
-              <div className="bg-white p-8 rounded-[32px] shadow-xl border border-slate-100">
-                <h2 className="text-lg font-bold mb-6 flex items-center gap-2 text-emerald-600"><Flag size={20} /> Точки финиша</h2>
-                <div className="grid grid-cols-3 gap-2">
-                  {[1,2,3,4,5,6,7,8,9].map(num => (
-                    <div key={num} onClick={() => setFilterFinishNode(filterFinishNode === num ? null : num)} className={`p-3 rounded-xl flex flex-col items-center border cursor-pointer transition-all ${filterFinishNode === num ? 'bg-emerald-600 text-white shadow-lg' : 'bg-slate-50 border-transparent hover:border-slate-200'}`}>
-                      <span className="text-[8px] font-bold opacity-50 mb-1">{num}</span>
-                      <span className="text-lg font-black">{stats.finishNodeCounts[num] || 0}</span>
-                    </div>
-                  ))}
+              {/* Full Detailed Log Table */}
+              <div className="bg-slate-900 rounded-2xl border border-slate-800 shadow-xl p-4">
+                <div className="flex justify-between items-center mb-3">
+                  <h3 className="text-xs font-bold text-white flex items-center gap-1.5">
+                    <Activity size={14} className="text-indigo-400" />
+                    <span>Таблица всех линий и проб {activeSubjectId ? `(${activeSubjectId})` : ''}</span>
+                  </h3>
+                </div>
+
+                <div className="max-h-96 overflow-y-auto custom-scrollbar rounded-xl border border-slate-800 bg-slate-950">
+                  <table className="w-full text-left text-xs text-slate-300">
+                    <thead className="text-[10px] uppercase font-bold text-slate-400 sticky top-0 bg-slate-900/90 z-10 border-b border-slate-800">
+                      <tr>
+                        <th className="py-2.5 px-3">Проба</th>
+                        <th className="py-2.5 px-3">Тип линии</th>
+                        <th className="py-2.5 px-3">Время (мс)</th>
+                        <th className="py-2.5 px-3">Узлы (траектория)</th>
+                        <th className="py-2.5 px-3 text-right">Действия</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/60">
+                      {processedData.length > 0 ? (
+                        processedData
+                          .filter(t => t.subjectId === activeSubjectId)
+                          .map(t => (
+                            <React.Fragment key={`${t.subjectId}-${t.trialId}`}>
+                              {t.lines.map((l, idx) => {
+                                const isOverridden = manualOverrides.has(`${t.subjectId}-${t.trialId}`);
+                                const isSelected = selectedTrialId === t.trialId;
+                                const isVisible = filteredTrials.some(ft => ft.trialId === t.trialId);
+                                if (!isVisible && !isSelected) return null;
+
+                                return (
+                                  <tr
+                                    key={`${t.trialId}-${idx}`}
+                                    className={`hover:bg-slate-800/40 transition-colors ${isSelected ? 'bg-indigo-950/40' : ''} ${
+                                      excludedLines.has(`${t.subjectId}-${t.trialId}-${idx}`) ? 'opacity-40 line-through decoration-rose-500/60' : ''
+                                    }`}
+                                  >
+                                    <td className="py-2 px-3 font-mono font-bold text-white">#{t.trialId}</td>
+                                    <td className="py-2 px-3">
+                                      <span className="px-2 py-0.5 rounded text-[10px] font-bold border bg-slate-800 border-slate-700 text-slate-300">
+                                        {isOverridden ? 'прочая' : l.type}
+                                      </span>
+                                    </td>
+                                    <td className="py-2 px-3 font-mono text-slate-400">{idx === 0 ? t.trial_time_ms.toFixed(0) : ''}</td>
+                                    <td className="py-2 px-3 font-bold text-indigo-400 font-mono">{l.nodesVisited.join(' → ') || '---'}</td>
+                                    <td className="py-2 px-3 text-right">
+                                      <div className="flex items-center justify-end gap-1">
+                                        {idx === 0 && (
+                                          <button
+                                            onClick={() => toggleTrialExclusion(t.subjectId, t.trialId)}
+                                            className={`p-1 rounded transition-colors ${
+                                              excludedTrials.has(`${t.subjectId}-${t.trialId}`)
+                                                ? 'text-amber-400 bg-amber-500/20'
+                                                : 'text-slate-500 hover:text-amber-400'
+                                            }`}
+                                            title={excludedTrials.has(`${t.subjectId}-${t.trialId}`) ? "Вернуть пробу" : "Исключить пробу"}
+                                          >
+                                            {excludedTrials.has(`${t.subjectId}-${t.trialId}`) ? <RotateCcw size={13} /> : <Ban size={13} />}
+                                          </button>
+                                        )}
+                                        {idx === 0 && (
+                                          <button
+                                            onClick={() => toggleOverride(t)}
+                                            className="p-1 rounded text-slate-500 hover:text-rose-400 transition-colors"
+                                            title={isOverridden ? "Вернуть исходные типы" : "Пометить как прочую"}
+                                          >
+                                            {isOverridden ? <RotateCcw size={13} /> : <Trash2 size={13} />}
+                                          </button>
+                                        )}
+                                        {idx === 0 && (
+                                          <button
+                                            onClick={() => setSelectedTrialId(isSelected ? null : t.trialId)}
+                                            className={`p-1 rounded transition-colors ${
+                                              isSelected ? 'text-indigo-300' : 'text-slate-500 hover:text-indigo-400'
+                                            }`}
+                                            title="Посмотреть на холсте"
+                                          >
+                                            <Eye size={13} />
+                                          </button>
+                                        )}
+                                        <button
+                                          onClick={() => toggleLineExclusion(t.subjectId, t.trialId, idx)}
+                                          className={`p-1 rounded transition-colors ${
+                                            excludedLines.has(`${t.subjectId}-${t.trialId}-${idx}`) ? 'text-amber-400' : 'text-slate-500 hover:text-amber-400'
+                                          }`}
+                                          title="Исключить линию"
+                                        >
+                                          {excludedLines.has(`${t.subjectId}-${t.trialId}-${idx}`) ? <RotateCcw size={13} /> : <Scissors size={13} />}
+                                        </button>
+                                      </div>
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </React.Fragment>
+                          ))
+                      ) : (
+                        <tr>
+                          <td colSpan={5} className="py-8 text-center text-slate-500">
+                            Загрузите данные или выберите участника
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
                 </div>
               </div>
             </div>
-          </>
           )}
 
-          <div className="bg-white p-8 rounded-[32px] shadow-xl border border-slate-100">
-            <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-6 flex items-center gap-2"><Activity size={14} /> Лог проб {activeSubjectId ? `(${activeSubjectId})` : ''}</h3>
-            <div className="max-h-[500px] overflow-y-auto pr-2 custom-scrollbar">
-              <table className="w-full text-left text-[11px]">
-                <thead className="sticky top-0 bg-white border-b border-slate-100 z-10">
-                  <tr className="text-slate-400 uppercase">
-                    <th className="py-4 px-2">Проба</th>
-                    <th className="py-4 px-2">Тип</th>
-                    <th className="py-4 px-2">Время (мс)</th>
-                    <th className="py-4 px-2">Путь</th>
-                    <th className="py-4 px-2">Действия</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-50">
-                  {processedData.length > 0 ? processedData
-                    .filter(t => t.subjectId === activeSubjectId)
-                    .map(t => (
-                      <React.Fragment key={`${t.subjectId}-${t.trialId}`}>
-                        {t.lines.map((l, idx) => {
-                          const isOverridden = manualOverrides.has(`${t.subjectId}-${t.trialId}`);
-                          const isSelected = selectedTrialId === t.trialId;
-                          const isVisible = filteredTrials.some(ft => ft.trialId === t.trialId);
-                          if (!isVisible && !isSelected) return null;
-                          return (
-                            <tr key={`${t.trialId}-${idx}`} className={`hover:bg-blue-50/30 transition-colors ${isOverridden ? 'bg-slate-50 opacity-60' : ''} ${isSelected ? 'bg-blue-50' : ''} ${excludedLines.has(`${t.subjectId}-${t.trialId}-${idx}`) ? 'opacity-40 line-through decoration-orange-500/50' : ''}`}>
-                              <td className="py-4 px-2 font-black">#{t.trialId}</td>
-                              <td className="py-4 px-2"><span className="px-1.5 py-0.5 rounded font-bold uppercase text-[8px] border bg-slate-100 text-slate-500">{isOverridden ? 'прочая' : l.type}</span></td>
-                              <td className="py-4 px-2 font-black text-slate-400">{idx === 0 ? t.trial_time_ms.toFixed(0) : ''}</td>
-                              <td className="py-4 px-2 font-bold text-blue-600">{l.nodesVisited.join(' → ') || '---'}</td>
-                              <td className="py-4 px-2">
-                                <div className="flex items-center gap-1">
-                                  {idx === 0 && <button onClick={() => toggleOverride(t)} className="p-1.5 rounded-lg bg-slate-50 text-slate-400 hover:text-red-500" title="Исключить пробу">{isOverridden ? <RotateCcw size={14} /> : <Trash2 size={14} />}</button>}
-                                  {idx === 0 && <button onClick={() => setSelectedTrialId(isSelected ? null : t.trialId)} className="p-1.5 rounded-lg bg-slate-50 text-slate-400 hover:text-blue-500" title="Просмотр"><Eye size={14} /></button>}
-                                  <button 
-                                    onClick={() => toggleLineExclusion(t.subjectId, t.trialId, idx)} 
-                                    className={`p-1.5 rounded-lg bg-slate-50 transition-colors ${excludedLines.has(`${t.subjectId}-${t.trialId}-${idx}`) ? 'text-orange-500 bg-orange-50' : 'text-slate-400 hover:text-orange-500'}`} 
-                                    title="Исключить линию из статистики"
-                                  >
-                                    {excludedLines.has(`${t.subjectId}-${t.trialId}-${idx}`) ? <RotateCcw size={14} /> : <Ban size={14} />}
-                                  </button>
-                                </div>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </React.Fragment>
-                    )) : (<tr><td colSpan={5} className="py-12 text-center text-slate-300">{subjects.length > 0 ? "У выбранного участника нет валидных проб" : "Загрузите данные"}</td></tr>)}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
+          {/* ================= TAB 3: ТЕПЛОВЫЕ КАРТЫ ================= */}
+          {activeTab === 'heatmaps' && (
+            <div className="flex-1 overflow-y-auto custom-scrollbar p-5 space-y-6 bg-slate-950 select-none">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                <GlobalHeatMap
+                  title="Стартовые точки: все пробы"
+                  icon={<LayoutGrid size={18} />}
+                  points={globalHeatmapAll}
+                  normalizedNodes={averageNormalizedNodes}
+                />
+                <GlobalHeatMap
+                  title="Финишные точки: все пробы"
+                  icon={<Flag size={18} />}
+                  points={globalHeatmapFinishAll}
+                  normalizedNodes={averageNormalizedNodes}
+                />
+                <GlobalHeatMap
+                  title="Стартовые точки: финалы решений"
+                  icon={<Trophy size={18} />}
+                  points={globalHeatmapCorrectLast}
+                  normalizedNodes={averageNormalizedNodes}
+                />
+                <GlobalHeatMap
+                  title="Финишные точки: финалы решений"
+                  icon={<Trophy size={18} className="text-emerald-500" />}
+                  points={globalHeatmapFinishCorrectLast}
+                  normalizedNodes={averageNormalizedNodes}
+                />
+              </div>
 
-        <div className="xl:col-span-3 lg:col-span-12 space-y-6">
-          <div className="sticky top-8 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-1 gap-6">
-            <div className="bg-white p-6 rounded-[32px] shadow-xl border border-slate-100 animate-in fade-in slide-in-from-right-4">
-              <h2 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-6 flex items-center gap-2">
-                <Download size={16} className="text-blue-500" /> Экспорт данных
-              </h2>
-              <div className="flex flex-col gap-3">
-                {/* 3 Selectable Mode Exports */}
-                <button 
-                  onClick={exportKinematicsCSV} 
-                  className={`w-full flex items-center justify-between px-4 py-3.5 rounded-2xl font-black transition-all group shadow-sm ${
-                    analysisMode === 'kinematics' 
-                      ? 'bg-amber-500 text-white shadow-amber-200 ring-2 ring-amber-400' 
-                      : 'bg-amber-50 text-amber-900 hover:bg-amber-100'
-                  }`}
-                  title="Экспорт кинематических метрик (скорость, паузы, пики, выходы за рамку)"
-                >
-                  <span className="flex items-center gap-3 text-sm">
-                    <Zap size={18} className={analysisMode === 'kinematics' ? 'text-white' : 'text-amber-600'} /> 
-                    <span>⚡ Экспорт Кинематики (.csv)</span>
-                  </span>
-                  <ChevronRight size={16} className="opacity-60 group-hover:opacity-100 transition-opacity" />
-                </button>
-
-                <button 
-                  onClick={exportAllDataCSV} 
-                  className={`w-full flex items-center justify-between px-4 py-3.5 rounded-2xl font-black transition-all group shadow-sm ${
-                    analysisMode === 'geometry' 
-                      ? 'bg-blue-600 text-white shadow-blue-200 ring-2 ring-blue-400' 
-                      : 'bg-blue-50 text-blue-900 hover:bg-blue-100'
-                  }`}
-                  title="Экспорт классической геометрии SIGMA (узлы, типы линий, фазы)"
-                >
-                  <span className="flex items-center gap-3 text-sm">
-                    <Ruler size={18} className={analysisMode === 'geometry' ? 'text-white' : 'text-blue-600'} /> 
-                    <span>📐 Экспорт Геометрии (.csv)</span>
-                  </span>
-                  <ChevronRight size={16} className="opacity-60 group-hover:opacity-100 transition-opacity" />
-                </button>
-
-                <button 
-                  onClick={exportDuplexCSV} 
-                  className={`w-full flex items-center justify-between px-4 py-3.5 rounded-2xl font-black transition-all group shadow-lg ${
-                    analysisMode === 'duplex' 
-                      ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-indigo-200 ring-2 ring-purple-400' 
-                      : 'bg-slate-100 text-slate-800 hover:bg-slate-200'
-                  }`}
-                  title="Экспорт полного дуплексного отчета (Геометрия + Кинематика MOGNU)"
-                >
-                  <span className="flex items-center gap-3 text-sm">
-                    <Layers size={18} className={analysisMode === 'duplex' ? 'text-white' : 'text-indigo-600'} /> 
-                    <span>🚀 Полный Дуплекс Экспорт (.csv)</span>
-                  </span>
-                  <ChevronRight size={16} className="opacity-60 group-hover:opacity-100 transition-opacity" />
-                </button>
-
-                <div className="w-full h-[1px] bg-slate-100 my-1" />
-
-                <button 
-                  onClick={exportCSV} 
-                  className="w-full flex items-center justify-between px-4 py-3.5 bg-slate-100 text-slate-900 rounded-2xl font-bold hover:bg-slate-200 transition-all group shadow-sm"
-                  title="Экспорт текущего представления"
-                >
-                  <span className="flex items-center gap-3 text-sm">
-                    <FileDown size={18} className="text-slate-500 group-hover:text-blue-600" /> 
-                    <span>Экспорт выборки</span>
-                  </span>
-                  <ChevronRight size={16} className="text-slate-400 opacity-60 group-hover:opacity-100 transition-opacity" />
-                </button>
-                
-                <button 
-                  onClick={exportAllDataCSV} 
-                  className="w-full flex items-center justify-between px-4 py-3.5 bg-slate-900 text-white rounded-2xl font-bold hover:bg-black shadow-lg shadow-slate-200 transition-all group"
-                  title="Экспорт всех данных всех испытуемых"
-                >
-                  <span className="flex items-center gap-3 text-sm">
-                    <FileDown size={18} className="text-slate-400 group-hover:text-white" /> 
-                    <span>Экспорт всех данных</span>
-                  </span>
-                  <ChevronRight size={16} className="text-slate-400 opacity-60 group-hover:opacity-100 transition-opacity" />
-                </button>
-                
-                <button 
-                  onClick={exportStatsCSV} 
-                  className="w-full flex items-center justify-between px-4 py-3.5 bg-indigo-600 text-white rounded-2xl font-bold hover:bg-indigo-700 shadow-lg shadow-indigo-100 transition-all group"
-                  title="Сводная статистика"
-                >
-                  <span className="flex items-center gap-3 text-sm">
-                    <BarChart3 size={18} className="text-indigo-200 group-hover:text-white" /> 
-                    <span>Сводная статистика</span>
-                  </span>
-                  <ChevronRight size={16} className="text-indigo-200 opacity-60 group-hover:opacity-100 transition-opacity" />
-                </button>
-                
-                <div className="pt-4 mt-2 border-t border-slate-100">
-                  <button 
-                    onClick={exportSession} 
-                    className="w-full flex items-center justify-between px-4 py-3.5 bg-emerald-600 text-white rounded-2xl font-bold hover:bg-emerald-700 shadow-lg shadow-emerald-100 transition-all group"
-                    title="Сохранить всю сессию в JSON"
-                  >
-                    <span className="flex items-center gap-3 text-sm">
-                      <Download size={18} className="text-emerald-200 group-hover:text-white" /> 
-                      <span>Сохранить сессию</span>
-                    </span>
-                    <ChevronRight size={16} className="text-emerald-200 opacity-60 group-hover:opacity-100 transition-opacity" />
-                  </button>
-                  <p className="mt-2 text-[10px] text-slate-400 text-center font-medium leading-relaxed">
-                    JSON для восстановления параметров и группировок
-                  </p>
+              <div className="pt-4 border-t border-slate-800">
+                <h3 className="text-base font-black text-white mb-4">Глобальные карты траекторий линий</h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                  <GlobalLineMap
+                    title="Все линии: все пробы"
+                    icon={<Activity size={18} />}
+                    lines={globalLineMapAll}
+                    normalizedNodes={averageNormalizedNodes}
+                  />
+                  <GlobalLineMap
+                    title="Все линии: финалы решений"
+                    icon={<Trophy size={18} className="text-emerald-500" />}
+                    lines={globalLineMapCorrectLast}
+                    normalizedNodes={averageNormalizedNodes}
+                  />
                 </div>
               </div>
             </div>
+          )}
 
-            <div className="bg-slate-900 p-6 rounded-[32px] shadow-xl text-white relative overflow-hidden group">
-               <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:scale-110 transition-transform"><Activity size={80} /></div>
-               <p className="text-[10px] font-black uppercase tracking-widest opacity-60 mb-1">Статус анализа</p>
-               <h3 className="text-2xl font-black">{subjects.length} <span className="text-xs opacity-60 uppercase font-bold">Субъектов</span></h3>
-               <p className="text-xs text-slate-400 mt-1">{processedData.length} проб всего</p>
-               <div className="mt-4 flex gap-2">
-                 <div className="flex-1 h-1.5 bg-white/20 rounded-full overflow-hidden">
-                   <div className="h-full bg-blue-500 transition-all duration-1000" style={{ width: subjects.length > 0 ? '100%' : '0%' }}></div>
-                 </div>
-               </div>
-            </div>
-          </div>
-        </div>
+          {/* ================= TAB 4: СВОДНЫЙ ОТЧЕТ & ЭКСПОРТ ================= */}
+          {activeTab === 'reports' && (
+            <div className="flex-1 overflow-y-auto custom-scrollbar p-6 space-y-6 bg-slate-950 select-none">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                {/* 1. EXPORT ACTIONS CARD */}
+                <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 shadow-xl space-y-4">
+                  <h3 className="text-xs font-black uppercase tracking-wider text-slate-400 flex items-center gap-2">
+                    <Download size={15} className="text-indigo-400" />
+                    <span>Выгрузка данных</span>
+                  </h3>
 
-        {processedData.length > 0 && (
-          <div className="lg:col-span-12 space-y-12 mt-12 animate-in slide-in-from-bottom-8 duration-700">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-              <GlobalHeatMap 
-                title="Стартовые точки: все пробы" 
-                icon={<LayoutGrid size={20} />} 
-                points={globalHeatmapAll} 
-                normalizedNodes={averageNormalizedNodes} 
-              />
-              <GlobalHeatMap 
-                title="Финишные точки: все пробы" 
-                icon={<Flag size={20} />} 
-                points={globalHeatmapFinishAll} 
-                normalizedNodes={averageNormalizedNodes} 
-              />
-              <GlobalHeatMap 
-                title="Стартовые точки: финалы решений" 
-                icon={<Trophy size={20} />} 
-                points={globalHeatmapCorrectLast} 
-                normalizedNodes={averageNormalizedNodes} 
-              />
-              <GlobalHeatMap 
-                title="Финишные точки: финалы решений" 
-                icon={<Trophy size={20} className="text-emerald-500" />} 
-                points={globalHeatmapFinishCorrectLast} 
-                normalizedNodes={averageNormalizedNodes} 
-              />
-            </div>
+                  <div className="space-y-2">
+                    {/* EXCEL 2-SHEET EXPORT BUTTON */}
+                    <button
+                      onClick={handleExportExcel}
+                      disabled={subjects.length === 0}
+                      className="w-full flex items-center justify-between p-3 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white rounded-xl font-bold shadow-md shadow-emerald-600/30 transition-all text-xs"
+                    >
+                      <span className="flex items-center gap-2">
+                        <FileSpreadsheet size={16} />
+                        <span>Excel (.xlsx: 2 листа)</span>
+                      </span>
+                      <span className="text-[10px] bg-emerald-700/60 px-2 py-0.5 rounded-lg">Сводный</span>
+                    </button>
 
-            <div className="pt-12 border-t border-slate-200 mt-12">
-               <h2 className="text-2xl font-black text-slate-900 tracking-tight mb-8">Глобальные карты линий</h2>
-               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                 <GlobalLineMap 
-                   title="Все линии: все пробы" 
-                   icon={<Activity size={20} />} 
-                   lines={globalLineMapAll} 
-                   normalizedNodes={averageNormalizedNodes} 
-                 />
-                 <GlobalLineMap 
-                   title="Все линии: финалы решений" 
-                   icon={<Trophy size={20} className="text-emerald-500" />} 
-                   lines={globalLineMapCorrectLast} 
-                   normalizedNodes={averageNormalizedNodes} 
-                 />
-               </div>
-            </div>
+                    {/* DUPLEX FULL CSV */}
+                    <button
+                      onClick={exportDuplexCSV}
+                      disabled={subjects.length === 0}
+                      className="w-full flex items-center justify-between p-3 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white rounded-xl font-bold shadow-md shadow-indigo-600/30 transition-all text-xs"
+                    >
+                      <span className="flex items-center gap-2">
+                        <Layers size={16} />
+                        <span>MOGNU Дуплекс (.csv)</span>
+                      </span>
+                      <ChevronRight size={14} className="opacity-60" />
+                    </button>
 
-            <div className="pt-12 border-t border-slate-200 mt-12">
-               <div className="flex items-center gap-4 mb-8">
-                 <div className="p-3 bg-indigo-100 text-indigo-600 rounded-2xl"><Layers size={24} /></div>
-                 <div>
-                   <h2 className="text-2xl font-black text-slate-900 tracking-tight">Сравнение по опыту решения</h2>
-                   <p className="text-slate-500 font-medium">Анализ стратегий на основе предварительного опыта испытуемых (из experience.csv).</p>
-                 </div>
-               </div>
-               
-               <div className="space-y-24">
-                 {Object.entries(experienceGroups).map(([experience, data]: [string, any]) => (
-                   <div key={experience} className="space-y-8">
-                     <div className="flex items-center gap-3">
-                        <div className="h-px flex-1 bg-slate-200"></div>
-                        <div className="flex items-center gap-2 px-6 py-2 bg-white border border-slate-200 rounded-full shadow-sm">
-                           <GraduationCap size={18} className="text-indigo-500" />
-                           <span className="text-sm font-black uppercase tracking-widest text-slate-600">{experience}</span>
+                    {/* KINEMATICS CSV */}
+                    <button
+                      onClick={exportKinematicsCSV}
+                      disabled={subjects.length === 0}
+                      className="w-full flex items-center justify-between p-3 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-amber-300 rounded-xl font-bold transition-all text-xs border border-slate-700"
+                    >
+                      <span className="flex items-center gap-2">
+                        <Zap size={16} />
+                        <span>Кинематика (.csv)</span>
+                      </span>
+                      <ChevronRight size={14} className="opacity-60" />
+                    </button>
+
+                    {/* GEOMETRY CSV */}
+                    <button
+                      onClick={exportAllDataCSV}
+                      disabled={subjects.length === 0}
+                      className="w-full flex items-center justify-between p-3 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-blue-300 rounded-xl font-bold transition-all text-xs border border-slate-700"
+                    >
+                      <span className="flex items-center gap-2">
+                        <Ruler size={16} />
+                        <span>Геометрия СИГМА (.csv)</span>
+                      </span>
+                      <ChevronRight size={14} className="opacity-60" />
+                    </button>
+                  </div>
+
+                  <div className="pt-3 border-t border-slate-800 space-y-2">
+                    <button
+                      onClick={exportSession}
+                      disabled={subjects.length === 0}
+                      className="w-full flex items-center justify-between p-2.5 bg-slate-800/80 hover:bg-slate-800 disabled:opacity-40 text-slate-200 rounded-xl text-xs font-bold transition-all border border-slate-700/60"
+                    >
+                      <span className="flex items-center gap-2">
+                        <Download size={14} className="text-emerald-400" />
+                        <span>Сохранить сессию JSON</span>
+                      </span>
+                    </button>
+
+                    <label className="w-full flex items-center justify-between p-2.5 bg-slate-800/80 hover:bg-slate-800 text-slate-200 rounded-xl text-xs font-bold transition-all border border-slate-700/60 cursor-pointer">
+                      <span className="flex items-center gap-2">
+                        <Upload size={14} className="text-indigo-400" />
+                        <span>Загрузить сессию JSON</span>
+                      </span>
+                      <input type="file" accept=".json,.csv" onChange={importSession} className="hidden" />
+                    </label>
+                  </div>
+                </div>
+
+                {/* 2. OVERVIEW STATUS CARD */}
+                <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 shadow-xl space-y-4">
+                  <h3 className="text-xs font-black uppercase tracking-wider text-slate-400 flex items-center gap-2">
+                    <Activity size={15} className="text-emerald-400" />
+                    <span>Статус датасета</span>
+                  </h3>
+
+                  <div className="grid grid-cols-2 gap-3 text-xs">
+                    <div className="p-3 bg-slate-950 rounded-xl border border-slate-800">
+                      <span className="text-[10px] text-slate-500 block uppercase">Испытуемых</span>
+                      <span className="text-lg font-black text-white">{subjects.length}</span>
+                    </div>
+                    <div className="p-3 bg-slate-950 rounded-xl border border-slate-800">
+                      <span className="text-[10px] text-slate-500 block uppercase">Решили задачу</span>
+                      <span className="text-lg font-black text-amber-400">{solvedCount}</span>
+                    </div>
+                    <div className="p-3 bg-slate-950 rounded-xl border border-slate-800">
+                      <span className="text-[10px] text-slate-500 block uppercase">Всего проб</span>
+                      <span className="text-lg font-black text-indigo-400">{processedData.length}</span>
+                    </div>
+                    <div className="p-3 bg-slate-950 rounded-xl border border-slate-800">
+                      <span className="text-[10px] text-slate-500 block uppercase">Исключено проб</span>
+                      <span className="text-lg font-black text-rose-400">{excludedTrials.size}</span>
+                    </div>
+                  </div>
+
+                  <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 space-y-1.5 text-xs">
+                    <div className="flex justify-between text-slate-400 text-[11px]">
+                      <span>Доля решивших:</span>
+                      <span className="font-bold text-white">
+                        {subjects.length > 0 ? `${((solvedCount / subjects.length) * 100).toFixed(1)}%` : '0%'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between text-slate-400 text-[11px]">
+                      <span>Исключенных испытуемых:</span>
+                      <span className="font-bold text-rose-400">{excludedSubjects.size}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 3. LOG TERMINAL */}
+                <div className="bg-slate-900 p-5 rounded-2xl border border-slate-800 shadow-xl flex flex-col">
+                  <h3 className="text-xs font-black uppercase tracking-wider text-slate-400 mb-3 flex items-center gap-2">
+                    <FileText size={15} className="text-slate-400" />
+                    <span>Системный журнал</span>
+                  </h3>
+                  <div className="flex-1 bg-slate-950 rounded-xl border border-slate-800 p-3 font-mono text-[10px] text-slate-300 space-y-1 overflow-y-auto max-h-60 custom-scrollbar">
+                    {log.length > 0 ? (
+                      log.map((l, i) => (
+                        <div key={i} className="whitespace-pre-wrap">
+                          <span className="text-indigo-400 font-bold">[{i}]</span> {l}
                         </div>
-                        <div className="h-px flex-1 bg-slate-200"></div>
-                     </div>
-                     
-                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                        <GlobalHeatMap 
-                          title="Точки старта (все пробы)" 
-                          icon={<Target size={20} className="text-red-500" />} 
-                          points={data.start} 
-                          normalizedNodes={averageNormalizedNodes}
-                          badge={experience}
-                        />
-                        <GlobalHeatMap 
-                          title="Точки финиша (все пробы)" 
-                          icon={<Flag size={20} className="text-emerald-500" />} 
-                          points={data.finish} 
-                          normalizedNodes={averageNormalizedNodes}
-                          badge={experience}
-                        />
-                        <GlobalHeatMap 
-                          title="Успешные финалы: точки старта" 
-                          icon={<Trophy size={20} className="text-amber-500" />} 
-                          points={data.solvedFinalStart} 
-                          normalizedNodes={averageNormalizedNodes}
-                          badge={`${experience} • УСПЕХ`}
-                          color="amber"
-                        />
-                        <GlobalHeatMap 
-                          title="Успешные финалы: точки финиша" 
-                          icon={<Star size={20} className="text-amber-500" />} 
-                          points={data.solvedFinalFinish} 
-                          normalizedNodes={averageNormalizedNodes}
-                          badge={`${experience} • УСПЕХ`}
-                          color="amber"
-                        />
-                     </div>
-                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mt-6">
-                        <GlobalLineMap 
-                          title="Все линии (все пробы)" 
-                          icon={<Activity size={20} className="text-blue-500" />} 
-                          lines={experienceLineGroups[experience]?.all || []} 
-                          normalizedNodes={averageNormalizedNodes}
-                          badge={experience}
-                        />
-                        <GlobalLineMap 
-                          title="Успешные финалы: все линии" 
-                          icon={<Trophy size={20} className="text-amber-500" />} 
-                          lines={experienceLineGroups[experience]?.solvedFinal || []} 
-                          normalizedNodes={averageNormalizedNodes}
-                          badge={`${experience} • УСПЕХ`}
-                          color="amber"
-                        />
-                     </div>
-                   </div>
-                 ))}
-               </div>
+                      ))
+                    ) : (
+                      <span className="text-slate-600">Журнал пуст. Загрузите файлы для начала работы.</span>
+                    )}
+                  </div>
+                </div>
+              </div>
             </div>
-          </div>
-        )}
-      </main>
+          )}
+        </main>
+      </div>
 
-      <footer className="max-w-[1720px] w-full mx-auto px-4 sm:px-6 lg:px-8 mt-20 pt-8 border-t border-slate-200 text-slate-400 text-[10px] uppercase font-black tracking-[0.2em] flex flex-col md:flex-row justify-between gap-4">
-        <p>&copy; 2025 Cognition Research Hub</p>
-        <p>Refined Analysis Multi-Subject v12.11</p>
-      </footer>
-
-      <style>{`
-        @keyframes spin-slow { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-        .animate-spin-slow { animation: spin-slow 8s linear infinite; }
-        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
-        .custom-scrollbar::-webkit-scrollbar-track { background: #f1f5f9; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
-        input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
-        input[type=number] { -moz-appearance: textfield; }
-      `}</style>
+      {/* Toast Notification */}
+      {toastMessage && (
+        <div className={`fixed bottom-5 right-5 z-50 px-4 py-2.5 rounded-xl shadow-2xl flex items-center gap-2.5 text-xs font-bold text-white transition-all transform animate-in fade-in slide-in-from-bottom-3 ${
+          toastMessage.type === 'error' ? 'bg-rose-600 shadow-rose-600/30' :
+          toastMessage.type === 'info' ? 'bg-indigo-600 shadow-indigo-600/30' :
+          'bg-emerald-600 shadow-emerald-600/30'
+        }`}>
+          {toastMessage.type === 'error' ? <AlertCircle size={15} /> : <CheckSquare size={15} />}
+          <span>{toastMessage.text}</span>
+        </div>
+      )}
     </div>
   );
 };

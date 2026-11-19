@@ -1,15 +1,20 @@
-import { Point, ProcessedTrial, SubjectData } from './types';
-import { calculateDistance } from './geometry';
+import { Point, ProcessedTrial, SubjectData, ApexTargetConfig, TargetZoneId } from './types';
+import { calculateDistance, extractTrialApexOvershoot } from './geometry';
+import * as XLSX from 'xlsx';
 
 export const generateFilteredCSV = (
   filteredTrials: ProcessedTrial[],
   subjects: SubjectData[],
   manualOverrides: Set<string>,
-  subjectGroups: Record<string, string>
+  subjectGroups: Record<string, string>,
+  excludedSubjects: Set<string> = new Set(),
+  excludedTrials: Set<string> = new Set()
 ): string => {
+  subjects = subjects.filter(s => !excludedSubjects.has(s.id));
+  filteredTrials = filteredTrials.filter(t => !excludedSubjects.has(t.subjectId) && !excludedTrials.has(`${t.subjectId}-${t.trialId}`));
   const headers = [
     'LastName', 'FirstName', 'Age', 'Gender', 'SolvedBefore', 'Insight', 'totalTaskTime',
-    'Experience', 'SubjectId', 'Group', 'IsSolved', 'TrialId', 'trial_time_ms',
+    'SubjectId', 'Group', 'IsSolved', 'TrialId', 'trial_time_ms',
     'LineIdx', 'OriginalType', 'ActualType', 'IsManualOverride', 'Nodes',
     'StartX', 'StartY', 'FinishX', 'FinishY', 'StartsAtNode', 'EndsAtNode',
     'BothInDots', 'AnyOutDots', 'TrialFinishNode',
@@ -49,7 +54,6 @@ export const generateFilteredCSV = (
         subject?.solvedBefore || '',
         subject?.insight || '',
         subject?.totalTaskTime !== undefined ? subject.totalTaskTime.toString() : '',
-        subject?.experience || '',
         t.subjectId,
         subjectGroups[t.subjectId] || 'None',
         isSolved ? '1' : '0',
@@ -84,11 +88,15 @@ export const generateAllDataCSV = (
   subjects: SubjectData[],
   processedData: ProcessedTrial[],
   manualOverrides: Set<string>,
-  subjectGroups: Record<string, string>
+  subjectGroups: Record<string, string>,
+  excludedSubjects: Set<string> = new Set(),
+  excludedTrials: Set<string> = new Set()
 ): string => {
+  subjects = subjects.filter(s => !excludedSubjects.has(s.id));
+  processedData = processedData.filter(t => !excludedSubjects.has(t.subjectId) && !excludedTrials.has(`${t.subjectId}-${t.trialId}`));
   const headers = [
     'LastName', 'FirstName', 'Age', 'Gender', 'SolvedBefore', 'Insight', 'totalTaskTime',
-    'Experience', 'SubjectId', 'Group', 'IsSolved', 'TrialId', 'trial_time_ms',
+    'SubjectId', 'Group', 'IsSolved', 'TrialId', 'trial_time_ms',
     'LineIdx', 'OriginalType', 'ActualType', 'IsManualOverride', 'Nodes',
     'StartX', 'StartY', 'FinishX', 'FinishY', 'StartsAtNode', 'EndsAtNode',
     'BothInDots', 'AnyOutDots', 'TrialFinishNode',
@@ -134,7 +142,6 @@ export const generateAllDataCSV = (
           subject.solvedBefore || '',
           subject.insight || '',
           subject.totalTaskTime !== undefined ? subject.totalTaskTime.toString() : '',
-          subject.experience || '',
           t.subjectId,
           subjectGroups[subject.id] || 'None',
           isSolved ? '1' : '0',
@@ -166,16 +173,51 @@ export const generateAllDataCSV = (
   return [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
 };
 
-export const generateStatsCSV = (
-  subjects: SubjectData[],
-  processedData: ProcessedTrial[],
-  manualOverrides: Set<string>,
-  excludedLines: Set<string>,
-  subjectGroups: Record<string, string>,
-  excludedSubjects: Set<string>
-): string => {
+export interface SummaryDataset {
+  headers: string[];
+  categoryHeaders: string[];
+  sheet1RowsRaw: any[][];
+  sheet1RowsCSV: string[][];
+  phaseSheetHeaders: string[];
+  phaseSheetCategory: string[];
+  sheet2RowsRaw: any[][];
+}
+
+export const computeSummaryDataset = (
+  subjectsInput: any,
+  processedDataInput: any,
+  manualOverridesInput: any = new Set(),
+  excludedLinesInput: any = new Set(),
+  subjectGroupsInput: any = {},
+  excludedSubjectsInput: any = new Set(),
+  excludedTrialsInput: any = new Set(),
+  subjectApexConfigsInput: any = {},
+  globalBoxPaddingInput: number = 15.0,
+  manualZoneOverridesInput: any = {}
+): SummaryDataset => {
+  let subjects: SubjectData[] = Array.isArray(subjectsInput) ? subjectsInput : [];
+  let processedData: ProcessedTrial[] = Array.isArray(processedDataInput) ? processedDataInput : [];
+
+  // Defensive swap if caller inverted (processedData, subjects)
+  if (subjects.length > 0 && ('trialId' in subjects[0]) && processedData.length > 0 && ('nodes' in processedData[0])) {
+    const tmp = subjects;
+    subjects = processedData as any;
+    processedData = tmp as any;
+  }
+
+  const manualOverrides = manualOverridesInput instanceof Set ? manualOverridesInput : new Set<string>();
+  const excludedLines = excludedLinesInput instanceof Set ? excludedLinesInput : new Set<string>();
+  const subjectGroups = (subjectGroupsInput && typeof subjectGroupsInput === 'object' && !(subjectGroupsInput instanceof Set))
+    ? (subjectGroupsInput as Record<string, string>)
+    : {};
+  const excludedSubjects = excludedSubjectsInput instanceof Set ? excludedSubjectsInput : new Set<string>();
+  const excludedTrials = excludedTrialsInput instanceof Set ? excludedTrialsInput : new Set<string>();
+  const subjectApexConfigs: Record<string, ApexTargetConfig> = (subjectApexConfigsInput && typeof subjectApexConfigsInput === 'object') ? subjectApexConfigsInput : {};
+  const globalBoxPadding = typeof globalBoxPaddingInput === 'number' ? globalBoxPaddingInput : 15.0;
+  const manualZoneOverrides: Record<string, TargetZoneId> = (manualZoneOverridesInput && typeof manualZoneOverridesInput === 'object') ? manualZoneOverridesInput : {};
+
   subjects = subjects.filter(s => !excludedSubjects.has(s.id));
-  processedData = processedData.filter(t => !excludedSubjects.has(t.subjectId));
+  processedData = processedData.filter(t => !excludedSubjects.has(t.subjectId) && !excludedTrials.has(`${t.subjectId}-${t.trialId}`));
 
   const lineTypes = ['боковая', 'центральная', 'диагональная', 'хордовая', 'хорды_длинные', 'внешняя', 'касательная', 'прочая'];
   const nodeIds = [1, 2, 3, 4, 5, 6, 7, 8, 9];
@@ -241,9 +283,9 @@ export const generateStatsCSV = (
   ];
 
   const headers = [
-    'LastName', 'FirstName', 'Age', 'Gender', 'SolvedBefore', 'Insight', 'totalTaskTime',
+    'SubjectId', 'Group', 'LastName', 'FirstName', 'Age', 'Gender', 'SolvedBefore', 'Insight', 'totalTaskTime', 'IsSolved',
+    'TrialsCount', 'LinesCount', 'mean_trial_time_ms', 'total_solution_time_ms',
     ...allScaleNames.map(sc => `Scale_${sc}`),
-    'Experience', 'SubjectId', 'Group', 'IsSolved', 'TrialsCount', 'LinesCount', 'mean_trial_time_ms', 'total_solution_time_ms',
     ...kinHeaders,
     'SolutionStartNode', 'SolutionFinishNode', 'SolutionStartLine',
     'FirstTrialStartNode', 'FirstTrialFinishNode', 'FirstTrialFirstLineType',
@@ -256,12 +298,60 @@ export const generateStatsCSV = (
     'LinesBothEndsInNodesAbs', 'LinesBothEndsInNodesRel',
     'LinesAnyEndOutsideAbs', 'LinesAnyEndOutsideRel',
     'AvgAllLinesLength', 'AvgOutsideLinesLength',
+    'Probing_Slope', 'Probing_MeanOvershootPx', 'Probing_MeanAbsErrorPx', 'Probing_InCorridorCount', 'Probing_InCorridorRatio',
     ...lineTypes.map(t => `LineType_${t}`),
     ...nodeIds.map(n => `StartNode_${n}`),
     ...nodeIds.map(n => `FinishNode_${n}`),
     ...posHeaders,
     ...phaseHeaders
   ];
+
+  const categoryHeaders = [
+    'ДЕМОГРАФИЯ И МЕТАДАННЫЕ', 'ДЕМОГРАФИЯ И МЕТАДАННЫЕ', 'ДЕМОГРАФИЯ И МЕТАДАННЫЕ', 'ДЕМОГРАФИЯ И МЕТАДАННЫЕ',
+    'ДЕМОГРАФИЯ И МЕТАДАННЫЕ', 'ДЕМОГРАФИЯ И МЕТАДАННЫЕ', 'ДЕМОГРАФИЯ И МЕТАДАННЫЕ', 'ДЕМОГРАФИЯ И МЕТАДАННЫЕ',
+    'ДЕМОГРАФИЯ И МЕТАДАННЫЕ', 'ДЕМОГРАФИЯ И МЕТАДАННЫЕ',
+    'ОСНОВНЫЕ РЕЗУЛЬТАТЫ ЗАДАЧИ', 'ОСНОВНЫЕ РЕЗУЛЬТАТЫ ЗАДАЧИ', 'ОСНОВНЫЕ РЕЗУЛЬТАТЫ ЗАДАЧИ', 'ОСНОВНЫЕ РЕЗУЛЬТАТЫ ЗАДАЧИ',
+    ...allScaleNames.map(() => 'ШКАЛЫ ОПРОСНИКА'),
+    ...kinHeaders.map(() => 'КИНЕМАТИКА (MOGNU)'),
+    'КЛЮЧЕВЫЕ ТОЧКИ И ЛИНИИ', 'КЛЮЧЕВЫЕ ТОЧКИ И ЛИНИИ', 'КЛЮЧЕВЫЕ ТОЧКИ И ЛИНИИ',
+    'КЛЮЧЕВЫЕ ТОЧКИ И ЛИНИИ', 'КЛЮЧЕВЫЕ ТОЧКИ И ЛИНИИ', 'КЛЮЧЕВЫЕ ТОЧКИ И ЛИНИИ',
+    'ПОВОРОТЫ И ВЫХОДЫ ЗА ПРЕДЕЛЫ', 'ПОВОРОТЫ И ВЫХОДЫ ЗА ПРЕДЕЛЫ', 'ПОВОРОТЫ И ВЫХОДЫ ЗА ПРЕДЕЛЫ',
+    'ПОВОРОТЫ И ВЫХОДЫ ЗА ПРЕДЕЛЫ', 'ПОВОРОТЫ И ВЫХОДЫ ЗА ПРЕДЕЛЫ', 'ПОВОРОТЫ И ВЫХОДЫ ЗА ПРЕДЕЛЫ', 'ПОВОРОТЫ И ВЫХОДЫ ЗА ПРЕДЕЛЫ',
+    'ЧИСЛО ТОЧЕК НА ЛИНИЯХ', 'ЧИСЛО ТОЧЕК НА ЛИНИЯХ', 'ЧИСЛО ТОЧЕК НА ЛИНИЯХ',
+    'ЧИСЛО ТОЧЕК НА ЛИНИЯХ', 'ЧИСЛО ТОЧЕК НА ЛИНИЯХ', 'ЧИСЛО ТОЧЕК НА ЛИНИЯХ',
+    'КОНЦЫ ЛИНИЙ И ДЛИНЫ', 'КОНЦЫ ЛИНИЙ И ДЛИНЫ', 'КОНЦЫ ЛИНИЙ И ДЛИНЫ',
+    'КОНЦЫ ЛИНИЙ И ДЛИНЫ', 'КОНЦЫ ЛИНИЙ И ДЛИНЫ', 'КОНЦЫ ЛИНИЙ И ДЛИНЫ',
+    'ЗОНА ПОВОРОТА И НАЩУПЫВАНИЕ (PROBING)', 'ЗОНА ПОВОРОТА И НАЩУПЫВАНИЕ (PROBING)', 'ЗОНА ПОВОРОТА И НАЩУПЫВАНИЕ (PROBING)',
+    'ЗОНА ПОВОРОТА И НАЩУПЫВАНИЕ (PROBING)', 'ЗОНА ПОВОРОТА И НАЩУПЫВАНИЕ (PROBING)',
+    ...lineTypes.map(() => 'ТИПЫ ЛИНИЙ'),
+    ...nodeIds.map(() => 'ТОЧКИ СТАРТА ЛИНИЙ'),
+    ...nodeIds.map(() => 'ТОЧКИ ФИНИША ЛИНИЙ'),
+    ...posHeaders.map(() => 'ПОЗИЦИИ ЛИНИЙ В ПРОБАХ (1-4)'),
+    ...phaseHeaders.map(() => 'ДИНАМИКА ПО ЭТАПАМ (ШИРОКИЙ ФОРМАТ)')
+  ];
+
+  const phaseSheetHeaders = [
+    'SubjectId', 'Group', 'LastName', 'FirstName', 'Age', 'Gender', 'SolvedBefore', 'Insight', 'IsSolved',
+    'PhaseNum', 'PhaseName',
+    'Phase_TrialsCount', 'Phase_LinesCount', 'Phase_mean_trial_time_ms', 'Phase_total_solution_time_ms',
+    'Phase_Kin_MeanVelocityPxS', 'Phase_Kin_MaxPeakVelocityPxS',
+    'Phase_Kin_MeanMovementTimeS', 'Phase_Kin_MeanPauseTimeS', 'Phase_Kin_PauseTimeRatio',
+    'Phase_Kin_TotalPauseCount', 'Phase_Kin_TrialsWithOutsideBoxCount', 'Phase_Kin_TrialsWithOutsideBoxRatio',
+    'Phase_TotalTurns', 'Phase_NonDotTurns', 'Phase_NonDotTurnsRatio',
+    'Phase_LinesStartOutsideMatrixAbs', 'Phase_LinesStartOutsideMatrixRel',
+    'Phase_LinesFinishOutsideMatrixAbs', 'Phase_LinesFinishOutsideMatrixRel',
+    'Phase_Lines3PointsAbs', 'Phase_Lines3PointsRel',
+    'Phase_Lines2PointsAbs', 'Phase_Lines2PointsRel',
+    'Phase_Lines1PointAbs', 'Phase_Lines1PointRel',
+    'Phase_LinesBothEndsInNodesAbs', 'Phase_LinesBothEndsInNodesRel',
+    'Phase_LinesAnyEndOutsideAbs', 'Phase_LinesAnyEndOutsideRel',
+    'Phase_AvgAllLinesLength', 'Phase_AvgOutsideLinesLength',
+    ...lineTypes.map(t => `Phase_LineType_${t}`),
+    ...nodeIds.map(n => `Phase_StartNode_${n}`),
+    ...nodeIds.map(n => `Phase_FinishNode_${n}`)
+  ];
+
+  const phaseSheetCategory = phaseSheetHeaders.map((_, i) => i < 11 ? 'ИДЕНТИФИКАТОРЫ И ЭТАП' : 'МЕТРИКИ ЭТАПА');
 
   // Pre-group trials by subject for O(1) lookup
   const trialsBySubject = new Map<string, ProcessedTrial[]>();
@@ -279,7 +369,26 @@ export const generateStatsCSV = (
     return str;
   };
 
-  const subjectRows = subjects.map(s => {
+  const toNumericOrOriginal = (val: any) => {
+    if (val === null || val === undefined || val === '') return '';
+    if (typeof val === 'number') return val;
+    if (typeof val === 'boolean') return val ? 1 : 0;
+    if (typeof val === 'string') {
+      const trimmed = val.trim();
+      if (trimmed === '') return '';
+      if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
+        const num = Number(trimmed);
+        if (!isNaN(num)) return num;
+      }
+    }
+    return val;
+  };
+
+  const sheet1RowsRaw: any[][] = [];
+  const sheet1RowsCSV: string[][] = [];
+  const sheet2RowsRaw: any[][] = [];
+
+  subjects.forEach(s => {
     const hitPadding = s.calibration.hitPadding ?? 15;
     const subNodes = s.nodes;
     const subjectTrials = trialsBySubject.get(s.id) || [];
@@ -538,6 +647,66 @@ export const generateStatsCSV = (
       });
     });
 
+    // Probing Corridor Metrics calculation (fully synchronized with Convergence Graph & Apex Configs)
+    const subApexConfig = subjectApexConfigs[s.id] || s.apexConfig || {
+      idealOvershoot: 116.0,
+      toleranceMargin: 65.0,
+      solveOverride: false,
+      capMaxError: false
+    };
+
+    const idealStep = subApexConfig.idealOvershoot ?? 116.0;
+    const toleranceMargin = subApexConfig.toleranceMargin ?? 65.0;
+    const solveOverride = !!subApexConfig.solveOverride;
+    const capMaxError = !!subApexConfig.capMaxError;
+
+    let probingSumOvershoot = 0;
+    let probingSumAbsError = 0;
+    let probingInCorridorCount = 0;
+    const probingTrialErrors: { x: number; y: number }[] = [];
+
+    subjectTrials.forEach((t, tIdx) => {
+      const isSolution = (tIdx === subjectTrials.length - 1) && !!s.isSolved;
+      const trialKey = `${s.id}-${t.trialId}`;
+      const manualOverrideZone = manualZoneOverrides[trialKey] || null;
+
+      const apexRes = extractTrialApexOvershoot(t, s.nodes, {
+        idealStep,
+        tolerance: toleranceMargin,
+        boxPadding: globalBoxPadding,
+        isSolvedTrial: isSolution,
+        solveOverride,
+        capMaxError,
+        overrideZoneId: manualOverrideZone
+      });
+
+      probingSumOvershoot += apexRes.overshootPx;
+      probingSumAbsError += apexRes.absDeltaL;
+      if (apexRes.status === 'hit') {
+        probingInCorridorCount++;
+      }
+      probingTrialErrors.push({ x: tIdx + 1, y: apexRes.absDeltaL });
+    });
+
+    const probingMeanOvershoot = subjectTrials.length > 0 ? (probingSumOvershoot / subjectTrials.length).toFixed(1) : '0';
+    const probingMeanAbsError = subjectTrials.length > 0 ? (probingSumAbsError / subjectTrials.length).toFixed(1) : '0';
+    const probingInCorridorRatio = subjectTrials.length > 0 ? ((probingInCorridorCount / subjectTrials.length) * 100).toFixed(1) : '0';
+
+    let probingSlope = '0';
+    if (probingTrialErrors.length > 1) {
+      const n = probingTrialErrors.length;
+      let sumX = 0, sumY = 0, sumXY = 0, sumXX = 0;
+      probingTrialErrors.forEach(pt => {
+        sumX += pt.x;
+        sumY += pt.y;
+        sumXY += pt.x * pt.y;
+        sumXX += pt.x * pt.x;
+      });
+      const denom = (n * sumXX - sumX * sumX);
+      const b = denom !== 0 ? (n * sumXY - sumX * sumY) / denom : 0;
+      probingSlope = b.toFixed(3);
+    }
+
     // Phase Stats logic
     const phaseSize = Math.floor(subjectTrials.length / 3);
     const subjectPhases = [
@@ -546,7 +715,9 @@ export const generateStatsCSV = (
       subjectTrials.slice(phaseSize * 2)
     ];
 
-    const phaseStats = subjectPhases.flatMap(phaseTrials => {
+    const phaseStatsFlat: any[] = [];
+
+    subjectPhases.forEach((phaseTrials, pIdx) => {
       const pTotal_solution_time_ms = phaseTrials.reduce((sum, t) => sum + (t.trial_time_ms || 0), 0);
       const pMean_trial_time_ms = phaseTrials.length > 0 ? pTotal_solution_time_ms / phaseTrials.length : 0;
 
@@ -657,7 +828,7 @@ export const generateStatsCSV = (
         return lastLine?.nodesVisited[lastLine.nodesVisited.length - 1] === nodeId;
       }).length);
 
-      return [
+      const pMetrics = [
         phaseTrials.length,
         pTotalLinesCount,
         pMean_trial_time_ms.toFixed(2),
@@ -693,9 +864,30 @@ export const generateStatsCSV = (
         ...pStartCounts,
         ...pFinishCounts
       ];
+
+      phaseStatsFlat.push(...pMetrics);
+
+      // Add to Sheet 2 (Tidy Long Format for Repeated Measures ANOVA / LMM)
+      const pRow = [
+        s.id,
+        subjectGroups[s.id] || s.group || 'None',
+        s.lastName,
+        s.firstName,
+        s.age,
+        s.gender,
+        s.solvedBefore || '',
+        s.insight || '',
+        s.isSolved ? 1 : 0,
+        pIdx + 1,
+        phases[pIdx],
+        ...pMetrics.map(toNumericOrOriginal)
+      ];
+      sheet2RowsRaw.push(pRow);
     });
 
     const values = [
+      s.id,
+      subjectGroups[s.id] || s.group || 'None',
       s.lastName,
       s.firstName,
       s.age,
@@ -703,15 +895,12 @@ export const generateStatsCSV = (
       s.solvedBefore || '',
       s.insight || '',
       s.totalTaskTime !== undefined ? s.totalTaskTime.toString() : '',
-      ...allScaleNames.map(name => s.surveyScales?.[name] !== undefined ? s.surveyScales[name].toString() : ''),
-      s.experience,
-      s.id,
-      subjectGroups[s.id] || 'None',
       s.isSolved ? '1' : '0',
       subjectTrials.length,
       subjectLines.length,
       subject_mean_trial_time_ms.toFixed(2),
       subject_total_solution_time_ms.toFixed(0),
+      ...allScaleNames.map(name => s.surveyScales?.[name] !== undefined ? s.surveyScales[name].toString() : ''),
       ...subjectKinematicsValues,
       solutionStartNode,
       solutionFinishNode,
@@ -738,24 +927,128 @@ export const generateStatsCSV = (
       linesAnyEndOutsideRel,
       avgAllLinesLengthInSubject,
       avgOutsideLinesLengthInSubject,
+      probingSlope,
+      probingMeanOvershoot,
+      probingMeanAbsError,
+      probingInCorridorCount.toString(),
+      probingInCorridorRatio,
       ...lineCounts,
       ...startCounts,
       ...finishCounts,
       ...positionCounts,
-      ...phaseStats
+      ...phaseStatsFlat
     ];
 
-    return values.map(escapeCSV);
+    sheet1RowsRaw.push(values.map(toNumericOrOriginal));
+    sheet1RowsCSV.push(values.map(escapeCSV));
   });
 
-  return [headers.join(','), ...subjectRows.map(r => r.join(','))].join('\n');
+  return {
+    headers,
+    categoryHeaders,
+    sheet1RowsRaw,
+    sheet1RowsCSV,
+    phaseSheetHeaders,
+    phaseSheetCategory,
+    sheet2RowsRaw
+  };
+};
+
+export const generateStatsCSV = (
+  subjects: SubjectData[],
+  processedData: ProcessedTrial[],
+  manualOverrides: Set<string>,
+  excludedLines: Set<string>,
+  subjectGroups: Record<string, string>,
+  excludedSubjects: Set<string> = new Set(),
+  excludedTrials: Set<string> = new Set(),
+  subjectApexConfigs: Record<string, ApexTargetConfig> = {},
+  globalBoxPadding: number = 15.0,
+  manualZoneOverrides: Record<string, TargetZoneId> = {}
+): string => {
+  const dataset = computeSummaryDataset(
+    subjects,
+    processedData,
+    manualOverrides,
+    excludedLines,
+    subjectGroups,
+    excludedSubjects,
+    excludedTrials,
+    subjectApexConfigs,
+    globalBoxPadding,
+    manualZoneOverrides
+  );
+  return [dataset.headers.join(','), ...dataset.sheet1RowsCSV.map(r => r.join(','))].join('\n');
+};
+
+export const exportExcelWorkbook = (
+  subjects: SubjectData[] | any,
+  processedData: ProcessedTrial[] | any,
+  manualOverrides: Set<string> | any = new Set(),
+  excludedLines: Set<string> | any = new Set(),
+  subjectGroups: Record<string, string> | any = {},
+  excludedSubjects: Set<string> | any = new Set(),
+  excludedTrials: Set<string> | any = new Set(),
+  subjectApexConfigs: Record<string, ApexTargetConfig> = {},
+  globalBoxPadding: number = 15.0,
+  manualZoneOverrides: Record<string, TargetZoneId> = {}
+): void => {
+  const dataset = computeSummaryDataset(
+    subjects,
+    processedData,
+    manualOverrides,
+    excludedLines,
+    subjectGroups,
+    excludedSubjects,
+    excludedTrials,
+    subjectApexConfigs,
+    globalBoxPadding,
+    manualZoneOverrides
+  );
+
+  const wb = XLSX.utils.book_new();
+
+  // Sheet 1: Общая статистика (2-row header: Categories + English column names)
+  const ws1Data = [
+    dataset.categoryHeaders,
+    dataset.headers,
+    ...dataset.sheet1RowsRaw
+  ];
+  const ws1 = XLSX.utils.aoa_to_sheet(ws1Data);
+
+  // Sheet 2: По этапам (2-row header: Category description + Column names)
+  const ws2Data = [
+    dataset.phaseSheetCategory,
+    dataset.phaseSheetHeaders,
+    ...dataset.sheet2RowsRaw
+  ];
+  const ws2 = XLSX.utils.aoa_to_sheet(ws2Data);
+
+  XLSX.utils.book_append_sheet(wb, ws1, 'Общая статистика');
+  XLSX.utils.book_append_sheet(wb, ws2, 'По этапам');
+
+  const dateStr = new Date().toISOString().slice(0, 10);
+  const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+  const blob = new Blob([wbout], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `sigma_summary_statistics_${dateStr}.xlsx`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 };
 
 export const generateKinematicsCSV = (
   trials: ProcessedTrial[],
   subjects: SubjectData[],
-  subjectGroups?: Record<string, string>
+  subjectGroups?: Record<string, string>,
+  excludedSubjects: Set<string> = new Set(),
+  excludedTrials: Set<string> = new Set()
 ): string => {
+  subjects = subjects.filter(s => !excludedSubjects.has(s.id));
+  trials = trials.filter(t => !excludedSubjects.has(t.subjectId) && !excludedTrials.has(`${t.subjectId}-${t.trialId}`));
   const headers = [
     'LastName', 'FirstName', 'Age', 'Gender', 'Group', 'SubjectId', 'IsSolved', 'TrialId',
     'DurationS', 'DurationMs', 'MovementTimeS', 'MovementTimeMs',
@@ -812,8 +1105,12 @@ export const generateDuplexFullCSV = (
   filteredTrials: ProcessedTrial[],
   subjects: SubjectData[],
   manualOverrides: Set<string>,
-  subjectGroups?: Record<string, string>
+  subjectGroups?: Record<string, string>,
+  excludedSubjects: Set<string> = new Set(),
+  excludedTrials: Set<string> = new Set()
 ): string => {
+  subjects = subjects.filter(s => !excludedSubjects.has(s.id));
+  filteredTrials = filteredTrials.filter(t => !excludedSubjects.has(t.subjectId) && !excludedTrials.has(`${t.subjectId}-${t.trialId}`));
   const headers = [
     'LastName', 'FirstName', 'Age', 'Gender', 'Group', 'SubjectId', 'IsSolved', 'TrialId',
     'LineIdx', 'OriginalType', 'ActualType', 'IsManualOverride', 'Nodes',

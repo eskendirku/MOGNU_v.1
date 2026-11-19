@@ -110,16 +110,29 @@ export interface Calibration {
   hitPadding: number;
 }
 
+export type TargetZoneId = 'TR_H' | 'TR_V' | 'BR_H' | 'BR_V' | 'BL_H' | 'BL_V' | 'TL_H' | 'TL_V';
+
+export interface ApexTargetConfig {
+  idealOvershoot: number;    // Baseline: 116.0 px
+  toleranceMargin: number;   // Baseline: 65.0 px (Вариант 1: коридор [51 .. 181 px])
+  boxPadding?: number;       // Baseline: 15.0 px (ручной отступ перцептивного пунктирного квадрата от крайних точек)
+  isAutoAligned?: boolean;
+  alignedTrialId?: string | number;
+  solveOverride?: boolean;   // Option 1: trial solved -> error = 0 (default: false)
+  capMaxError?: boolean;     // Option 3: error capped at baseline ideal step (default: false)
+}
+
 export interface SubjectData {
   id: string;
   nodes: GridNode[];
   cellSize: { w: number; h: number };
   calibration: Calibration;
+  apexConfig?: ApexTargetConfig;
   isSolved?: boolean;
   lastName: string;
   firstName: string;
   age: string;
-  experience: string;
+  experience?: string;
   gender: string;
   solvedBefore?: string;
   insight?: string;
