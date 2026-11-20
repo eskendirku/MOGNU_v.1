@@ -22,7 +22,7 @@ import {
   parseNum, detectDelimiter, decodeBuffer, processCSV
 } from './src/parser';
 import {
-  generateFilteredCSV, generateAllDataCSV, generateStatsCSV, generateKinematicsCSV, generateDuplexFullCSV, exportExcelWorkbook
+  generateFilteredCSV, generateAllDataCSV, generateStatsCSV, generateKinematicsCSV, generateDuplexFullCSV, generateProbingLongCSV, exportExcelWorkbook
 } from './src/stats';
 import { KinematicsVelocityGraph } from './src/components/KinematicsVelocityGraph';
 import { ProbingConvergenceGraph } from './src/components/ProbingConvergenceGraph';
@@ -2010,7 +2010,7 @@ const App: React.FC = () => {
         globalBoxPadding,
         manualZoneOverrides
       );
-      showToast('Сводная статистика успешно экспортирована в Excel (.xlsx: 2 листа)', 'success');
+      showToast('Сводная статистика успешно экспортирована в Excel (.xlsx: 3 листа: Сводная, По этапам, Long LMM)', 'success');
       addLog("Экспортирована сводная статистика в Excel (.xlsx).");
     } catch (err: any) {
       console.error('Excel export error:', err);
@@ -2047,6 +2047,32 @@ const App: React.FC = () => {
     link.download = `summary_statistics_${new Date().toISOString().slice(0, 10)}.csv`;
     link.click();
     addLog("Экспортирована сводная статистика (с геометрией и кинематикой MOGNU).");
+  };
+
+  const exportProbingLongCSV = () => {
+    if (subjects.length === 0) {
+      showToast('Нет данных испытуемых для экспорта', 'error');
+      return;
+    }
+    const csvContent = generateProbingLongCSV(
+      subjects,
+      processedData,
+      manualOverrides,
+      excludedLines,
+      subjectGroups,
+      excludedSubjects,
+      excludedTrials,
+      subjectApexConfigs,
+      globalBoxPadding,
+      manualZoneOverrides
+    );
+    const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `probing_lmm_long_${new Date().toISOString().slice(0, 10)}.csv`;
+    link.click();
+    addLog("Экспортирована попробная динамика (Long Format для LMM / GLMM / Survival).");
+    showToast("Попробный Long CSV успешно выгружен!", "success");
   };
 
   const exportSession = () => {
@@ -2260,7 +2286,7 @@ const App: React.FC = () => {
             onClick={handleExportExcel}
             disabled={subjects.length === 0}
             className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-sm shadow-emerald-600/30 transition-all"
-            title="Экспорт сводной статистики в Excel (.xlsx: Лист 1 'Общая статистика' + Лист 2 'По этапам')"
+            title="Экспорт сводной статистики в Excel (.xlsx: Лист 1 'Общая статистика' + Лист 2 'По этапам' + Лист 3 'Попробная динамика (LMM)')"
           >
             <FileSpreadsheet size={14} />
             <span className="hidden sm:inline">Excel (.xlsx)</span>
@@ -3464,9 +3490,23 @@ const App: React.FC = () => {
                     >
                       <span className="flex items-center gap-2">
                         <FileSpreadsheet size={16} />
-                        <span>Excel (.xlsx: 2 листа)</span>
+                        <span>Excel (.xlsx: 3 листа)</span>
                       </span>
-                      <span className="text-[10px] bg-emerald-700/60 px-2 py-0.5 rounded-lg">Сводный</span>
+                      <span className="text-[10px] bg-emerald-700/60 px-2 py-0.5 rounded-lg">Сводный + LMM</span>
+                    </button>
+
+                    {/* PROBING LONG FORMAT CSV (FOR LMM/GLMM) */}
+                    <button
+                      onClick={exportProbingLongCSV}
+                      disabled={subjects.length === 0}
+                      className="w-full flex items-center justify-between p-3 bg-teal-600 hover:bg-teal-500 disabled:opacity-40 text-white rounded-xl font-bold shadow-md shadow-teal-600/30 transition-all text-xs"
+                      title="Попробный лонг-формат для смешанных моделей (LMM / GLMM / Survival / Piecewise) в R, SPSS, JASP, Python"
+                    >
+                      <span className="flex items-center gap-2">
+                        <Activity size={16} />
+                        <span>Попробный Long CSV (LMM / GLMM)</span>
+                      </span>
+                      <span className="text-[10px] bg-teal-700/60 px-2 py-0.5 rounded-lg">R / JASP / LMM</span>
                     </button>
 
                     {/* DUPLEX FULL CSV */}

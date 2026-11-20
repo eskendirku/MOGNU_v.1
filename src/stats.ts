@@ -181,6 +181,10 @@ export interface SummaryDataset {
   phaseSheetHeaders: string[];
   phaseSheetCategory: string[];
   sheet2RowsRaw: any[][];
+  probingLongHeaders: string[];
+  probingLongCategory: string[];
+  probingLongRowsRaw: any[][];
+  probingLongRowsCSV: string[][];
 }
 
 export const computeSummaryDataset = (
@@ -387,6 +391,25 @@ export const computeSummaryDataset = (
   const sheet1RowsRaw: any[][] = [];
   const sheet1RowsCSV: string[][] = [];
   const sheet2RowsRaw: any[][] = [];
+
+  const probingLongHeaders = [
+    'SubjectId', 'Group', 'LastName', 'FirstName', 'Age', 'Gender', 'SolvedBefore', 'Insight', 'IsSolved',
+    'TotalSubjectTrials', 'TrialIndex', 'RelativeTrial', 'TrialId', 'TrialDurationMs', 'MovementTimeMs', 'PauseTimeMs',
+    'PhaseNum', 'PhaseName', 'IsSolutionTrial', 'IsOutsideMatrix', 'TargetZoneId', 'TargetZoneName', 'IsManualZoneOverride',
+    'ApexOvershootPx', 'IdealOvershootPx', 'ApexErrorPx', 'SignedErrorPx', 'ToleranceMarginPx', 'InCorridor', 'ApexStatus',
+    'TotalPathPx', 'PeakVelocityPxMs', 'AvgVelocityPxMs', 'LinesCount', 'TurnsCount'
+  ];
+
+  const probingLongCategory = [
+    'ДЕМОГРАФИЯ И ГРУППА', 'ДЕМОГРАФИЯ И ГРУППА', 'ДЕМОГРАФИЯ И ГРУППА', 'ДЕМОГРАФИЯ И ГРУППА', 'ДЕМОГРАФИЯ И ГРУППА', 'ДЕМОГРАФИЯ И ГРУППА', 'ДЕМОГРАФИЯ И ГРУППА', 'ДЕМОГРАФИЯ И ГРУППА', 'РЕЗУЛЬТАТ',
+    'ПОРЯДОК И ВРЕМЯ ПРОБЫ', 'ПОРЯДОК И ВРЕМЯ ПРОБЫ', 'ПОРЯДОК И ВРЕМЯ ПРОБЫ', 'ПОРЯДОК И ВРЕМЯ ПРОБЫ', 'ПОРЯДОК И ВРЕМЯ ПРОБЫ', 'КИНЕМАТИКА', 'КИНЕМАТИКА',
+    'ФАЗА СЕССИИ', 'ФАЗА СЕССИИ', 'РЕЗУЛЬТАТ', 'ТОПОЛОГИЯ', 'ЗОНА ПОВОРОТА', 'ЗОНА ПОВОРОТА', 'ЭКСПЕРТНАЯ РАЗМЕТКА',
+    'НАЩУПЫВАНИЕ (PROBING)', 'НАЩУПЫВАНИЕ (PROBING)', 'НАЩУПЫВАНИЕ (PROBING)', 'НАЩУПЫВАНИЕ (PROBING)', 'НАЩУПЫВАНИЕ (PROBING)', 'НАЩУПЫВАНИЕ (PROBING)', 'НАЩУПЫВАНИЕ (PROBING)',
+    'КИНЕМАТИКА', 'КИНЕМАТИКА', 'КИНЕМАТИКА', 'СТРУКТУРА ПРОБЫ', 'СТРУКТУРА ПРОБЫ'
+  ];
+
+  const probingLongRowsRaw: any[][] = [];
+  const probingLongRowsCSV: string[][] = [];
 
   subjects.forEach(s => {
     const hitPadding = s.calibration.hitPadding ?? 15;
@@ -686,6 +709,59 @@ export const computeSummaryDataset = (
         probingInCorridorCount++;
       }
       probingTrialErrors.push({ x: tIdx + 1, y: apexRes.absDeltaL });
+
+      // Build trial-level long format row for LMM / GLMM / Survival
+      const phaseSizeForTrial = Math.floor(subjectTrials.length / 3);
+      const phaseNumForTrial = tIdx < phaseSizeForTrial ? 1 : (tIdx < phaseSizeForTrial * 2 ? 2 : 3);
+      const phaseNameForTrial = phaseNumForTrial === 1 ? 'Early' : (phaseNumForTrial === 2 ? 'Mid' : 'Late');
+
+      const kMetrics = t.kinematics?.metrics;
+      const mTimeMs = kMetrics?.movementTimeMs !== undefined ? Math.round(kMetrics.movementTimeMs) : '';
+      const pTimeMs = kMetrics?.pauseTimeMs !== undefined ? Math.round(kMetrics.pauseTimeMs) : '';
+      const totalPath = kMetrics?.totalPathPx !== undefined ? Number(kMetrics.totalPathPx.toFixed(1)) : '';
+      const peakVel = kMetrics?.peakVelocityPxMs !== undefined ? Number(kMetrics.peakVelocityPxMs.toFixed(3)) : '';
+      const avgVel = kMetrics?.avgVelocityPxMs !== undefined ? Number(kMetrics.avgVelocityPxMs.toFixed(3)) : '';
+
+      const longRow = [
+        s.id,
+        subjectGroups[s.id] || s.group || 'None',
+        s.lastName || '',
+        s.firstName || '',
+        s.age || '',
+        s.gender || '',
+        s.solvedBefore || '',
+        s.insight || '',
+        s.isSolved ? 1 : 0,
+        subjectTrials.length,
+        tIdx + 1,
+        subjectTrials.length > 0 ? Number(((tIdx + 1) / subjectTrials.length).toFixed(4)) : 0,
+        t.trialId,
+        Math.round(t.trial_time_ms || 0),
+        mTimeMs,
+        pTimeMs,
+        phaseNumForTrial,
+        phaseNameForTrial,
+        isSolution ? 1 : 0,
+        apexRes.hasExit ? 1 : 0,
+        apexRes.activeZoneId || 'None',
+        apexRes.activeZoneName || 'Нет вылета',
+        manualOverrideZone ? 1 : 0,
+        Number(apexRes.overshootPx.toFixed(1)),
+        Number(idealStep.toFixed(1)),
+        Number(apexRes.absDeltaL.toFixed(1)),
+        Number((apexRes.overshootPx - idealStep).toFixed(1)),
+        Number(toleranceMargin.toFixed(1)),
+        apexRes.status === 'hit' ? 1 : 0,
+        apexRes.status,
+        totalPath,
+        peakVel,
+        avgVel,
+        t.lines.length,
+        t.breakPoints.length
+      ];
+
+      probingLongRowsRaw.push(longRow.map(toNumericOrOriginal));
+      probingLongRowsCSV.push(longRow.map(escapeCSV));
     });
 
     const probingMeanOvershoot = subjectTrials.length > 0 ? (probingSumOvershoot / subjectTrials.length).toFixed(1) : '0';
@@ -950,7 +1026,11 @@ export const computeSummaryDataset = (
     sheet1RowsCSV,
     phaseSheetHeaders,
     phaseSheetCategory,
-    sheet2RowsRaw
+    sheet2RowsRaw,
+    probingLongHeaders,
+    probingLongCategory,
+    probingLongRowsRaw,
+    probingLongRowsCSV
   };
 };
 
@@ -979,6 +1059,33 @@ export const generateStatsCSV = (
     manualZoneOverrides
   );
   return [dataset.headers.join(','), ...dataset.sheet1RowsCSV.map(r => r.join(','))].join('\n');
+};
+
+export const generateProbingLongCSV = (
+  subjects: SubjectData[],
+  processedData: ProcessedTrial[],
+  manualOverrides: Set<string>,
+  excludedLines: Set<string>,
+  subjectGroups: Record<string, string>,
+  excludedSubjects: Set<string> = new Set(),
+  excludedTrials: Set<string> = new Set(),
+  subjectApexConfigs: Record<string, ApexTargetConfig> = {},
+  globalBoxPadding: number = 15.0,
+  manualZoneOverrides: Record<string, TargetZoneId> = {}
+): string => {
+  const dataset = computeSummaryDataset(
+    subjects,
+    processedData,
+    manualOverrides,
+    excludedLines,
+    subjectGroups,
+    excludedSubjects,
+    excludedTrials,
+    subjectApexConfigs,
+    globalBoxPadding,
+    manualZoneOverrides
+  );
+  return [dataset.probingLongHeaders.join(','), ...dataset.probingLongRowsCSV.map(r => r.join(','))].join('\n');
 };
 
 export const exportExcelWorkbook = (
@@ -1024,8 +1131,17 @@ export const exportExcelWorkbook = (
   ];
   const ws2 = XLSX.utils.aoa_to_sheet(ws2Data);
 
+  // Sheet 3: Попробная динамика (LMM Long Format)
+  const ws3Data = [
+    dataset.probingLongCategory,
+    dataset.probingLongHeaders,
+    ...dataset.probingLongRowsRaw
+  ];
+  const ws3 = XLSX.utils.aoa_to_sheet(ws3Data);
+
   XLSX.utils.book_append_sheet(wb, ws1, 'Общая статистика');
   XLSX.utils.book_append_sheet(wb, ws2, 'По этапам');
+  XLSX.utils.book_append_sheet(wb, ws3, 'Попробная динамика (LMM)');
 
   const dateStr = new Date().toISOString().slice(0, 10);
   const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
