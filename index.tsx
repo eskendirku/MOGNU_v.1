@@ -2207,15 +2207,47 @@ const App: React.FC = () => {
 
   const [subjectSearch, setSubjectSearch] = useState('');
 
+  const [selectedGroupFilter, setSelectedGroupFilter] = useState<string | null>(null);
+
+  // Dynamic group aggregation across all subjects
+  const groupStats = useMemo(() => {
+    const map: Record<string, { total: number; solved: number; active: number; excluded: number }> = {};
+    subjects.forEach(s => {
+      const rawGrp = (subjectGroups[s.id] || s.group || '').trim();
+      const grp = rawGrp || 'Без группы';
+      if (!map[grp]) {
+        map[grp] = { total: 0, solved: 0, active: 0, excluded: 0 };
+      }
+      map[grp].total++;
+      if (s.isSolved) {
+        map[grp].solved++;
+      }
+      if (excludedSubjects.has(s.id)) {
+        map[grp].excluded++;
+      } else {
+        map[grp].active++;
+      }
+    });
+    return Object.entries(map).sort((a, b) => b[1].total - a[1].total);
+  }, [subjects, subjectGroups, excludedSubjects]);
+
   const filteredSubjects = useMemo(() => {
-    if (!subjectSearch.trim()) return subjects;
-    const q = subjectSearch.toLowerCase();
-    return subjects.filter(s =>
+    let list = subjects;
+    if (selectedGroupFilter !== null) {
+      list = list.filter(s => {
+        const grp = (subjectGroups[s.id] || s.group || '').trim() || 'Без группы';
+        return grp === selectedGroupFilter;
+      });
+    }
+    if (!subjectSearch.trim()) return list;
+    const q = subjectSearch.toLowerCase().trim();
+    return list.filter(s =>
       s.id.toLowerCase().includes(q) ||
       `${s.lastName || ''} ${s.firstName || ''}`.toLowerCase().includes(q) ||
-      (subjectGroups[s.id] && subjectGroups[s.id].toLowerCase().includes(q))
+      (subjectGroups[s.id] && subjectGroups[s.id].toLowerCase().includes(q)) ||
+      (s.group && s.group.toLowerCase().includes(q))
     );
-  }, [subjects, subjectSearch, subjectGroups]);
+  }, [subjects, subjectSearch, subjectGroups, selectedGroupFilter]);
 
   const solvedCount = useMemo(() => {
     return subjects.filter(s => s.isSolved).length;
@@ -2388,6 +2420,49 @@ const App: React.FC = () => {
                 </span>
               )}
             </div>
+
+            {/* Dynamic Group Filter & Distribution Chips */}
+            {groupStats.length > 0 && (
+              <div className="pt-2 pb-0.5 border-t border-slate-800/70 flex flex-wrap gap-1 px-1 max-h-24 overflow-y-auto custom-scrollbar">
+                <button
+                  onClick={() => setSelectedGroupFilter(null)}
+                  className={`px-2 py-0.5 rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 border ${
+                    selectedGroupFilter === null
+                      ? 'bg-indigo-600 text-white border-indigo-500 shadow-sm shadow-indigo-600/30'
+                      : 'bg-slate-800/80 text-slate-400 hover:text-slate-200 border-slate-700/60'
+                  }`}
+                  title="Показать всех испытуемых"
+                >
+                  <span>Все</span>
+                  <span className="text-[9px] opacity-75">({subjects.length})</span>
+                </button>
+                {groupStats.map(([grpName, gStat]) => {
+                  const isSelected = selectedGroupFilter === grpName;
+                  return (
+                    <button
+                      key={grpName}
+                      onClick={() => setSelectedGroupFilter(isSelected ? null : grpName)}
+                      className={`px-2 py-0.5 rounded-lg text-[10px] font-bold transition-all flex items-center gap-1.5 border ${
+                        isSelected
+                          ? 'bg-amber-600 text-white border-amber-500 shadow-sm shadow-amber-600/30'
+                          : 'bg-slate-800/80 text-slate-300 hover:text-white border-slate-700/60 hover:bg-slate-700/60'
+                      }`}
+                      title={`Группа «${grpName}»: всего ${gStat.total}, решили ${gStat.solved} (${((gStat.solved / Math.max(1, gStat.total)) * 100).toFixed(0)}%), исключено ${gStat.excluded}`}
+                    >
+                      <span className="truncate max-w-[100px]">{grpName}</span>
+                      <span className="px-1 py-0.2 rounded bg-slate-900/80 text-[9px] font-mono text-amber-300">
+                        {gStat.total}
+                      </span>
+                      {gStat.solved > 0 && (
+                        <span className="text-[9px] text-emerald-400 font-semibold" title={`Решили: ${gStat.solved}`}>
+                          ✓{gStat.solved}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           {/* Subject List Scrollable */}
@@ -3607,6 +3682,46 @@ const App: React.FC = () => {
                     <div className="flex justify-between text-slate-400 text-[11px]">
                       <span>Исключенных испытуемых:</span>
                       <span className="font-bold text-rose-400">{excludedSubjects.size}</span>
+                    </div>
+                  </div>
+
+                  {/* DYNAMIC GROUPS BREAKDOWN CARD */}
+                  <div className="p-4 bg-slate-950 rounded-xl border border-slate-800 space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-slate-300 flex items-center gap-1.5">
+                        <Users size={14} className="text-indigo-400" />
+                        <span>Испытуемые по группам</span>
+                      </span>
+                      <span className="text-[10px] text-slate-500">
+                        Групп: <b className="text-white">{groupStats.length}</b>
+                      </span>
+                    </div>
+
+                    <div className="space-y-1.5 max-h-56 overflow-y-auto custom-scrollbar pr-1">
+                      {groupStats.map(([grpName, gStat]) => {
+                        const pctOfTotal = subjects.length > 0 ? ((gStat.total / subjects.length) * 100).toFixed(1) : '0';
+                        const solvedPct = gStat.total > 0 ? ((gStat.solved / gStat.total) * 100).toFixed(1) : '0';
+                        return (
+                          <div key={grpName} className="p-2.5 bg-slate-900/80 rounded-lg border border-slate-800 flex items-center justify-between text-xs">
+                            <div className="space-y-0.5">
+                              <div className="flex items-center gap-1.5">
+                                <span className="font-bold text-slate-200">{grpName}</span>
+                                <span className="text-[10px] text-slate-500">({pctOfTotal}% выборки)</span>
+                              </div>
+                              <div className="text-[10px] text-slate-400">
+                                Решили: <b className="text-amber-400">{gStat.solved}</b> <span className="text-slate-500">({solvedPct}%)</span>
+                                {gStat.excluded > 0 && (
+                                  <span className="ml-2 text-rose-400">Искл: {gStat.excluded}</span>
+                                )}
+                              </div>
+                            </div>
+                            <div className="text-right">
+                              <span className="text-base font-black text-white">{gStat.total}</span>
+                              <span className="text-[10px] text-slate-500 block">исп.</span>
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 </div>
