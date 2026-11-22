@@ -1,5 +1,7 @@
 import { Point, ProcessedTrial, SubjectData, ApexTargetConfig, TargetZoneId } from './types';
-import { calculateDistance, extractTrialApexOvershoot } from './geometry';
+import { calculateDistance, extractTrialApexOvershoot, isPointInAnyNode, getLineLengthPx } from './geometry';
+import { calculateOLS } from './probing';
+import { downloadBlob } from './utils/download';
 import * as XLSX from 'xlsx';
 
 export const generateFilteredCSV = (
@@ -35,13 +37,7 @@ export const generateFilteredCSV = (
     const hitPadding = cal.hitPadding ?? 15;
     const subNodes = subject ? subject.nodes : [];
 
-    const isAtNode = (p: Point) => subNodes.some(node => {
-      const rx = (node.w / 2) + hitPadding;
-      const ry = (node.h / 2) + hitPadding;
-      const dx = (p.x - node.x) / rx;
-      const dy = (p.y - node.y) / ry;
-      return (dx * dx + dy * dy) <= 1.0;
-    });
+    const isAtNode = (p: Point) => isPointInAnyNode(p, subNodes, hitPadding);
 
     return t.lines.map((l, idx) => {
       const startAtNode = isAtNode(l.points[0]);
@@ -117,13 +113,7 @@ export const generateAllDataCSV = (
     const isSolved = subject.isSolved || false;
     const cal = subject.calibration;
 
-    const isAtNode = (p: Point) => subNodes.some(node => {
-      const rx = (node.w / 2) + hitPadding;
-      const ry = (node.h / 2) + hitPadding;
-      const dx = (p.x - node.x) / rx;
-      const dy = (p.y - node.y) / ry;
-      return (dx * dx + dy * dy) <= 1.0;
-    });
+    const isAtNode = (p: Point) => isPointInAnyNode(p, subNodes, hitPadding);
 
     return subjectTrials.flatMap(t => {
       const overrideKey = `${t.subjectId}-${t.trialId}`;
@@ -416,15 +406,7 @@ export const computeSummaryDataset = (
     const subNodes = s.nodes;
     const subjectTrials = trialsBySubject.get(s.id) || [];
 
-    const isPointInAnyNodeLocal = (p: Point) => {
-      return subNodes.some(node => {
-        const rx = (node.w / 2) + hitPadding;
-        const ry = (node.h / 2) + hitPadding;
-        const dx = (p.x - node.x) / rx;
-        const dy = (p.y - node.y) / ry;
-        return (dx * dx + dy * dy) <= 1.0;
-      });
-    };
+    const isPointInAnyNodeLocal = (p: Point) => isPointInAnyNode(p, subNodes, hitPadding);
 
     // First Trial Info
     const firstTrial = subjectTrials.length > 0 ? subjectTrials[0] : null;
@@ -768,20 +750,8 @@ export const computeSummaryDataset = (
     const probingMeanAbsError = subjectTrials.length > 0 ? (probingSumAbsError / subjectTrials.length).toFixed(1) : '0';
     const probingInCorridorRatio = subjectTrials.length > 0 ? ((probingInCorridorCount / subjectTrials.length) * 100).toFixed(1) : '0';
 
-    let probingSlope = '0';
-    if (probingTrialErrors.length > 1) {
-      const n = probingTrialErrors.length;
-      let sumX = 0, sumY = 0, sumXY = 0, sumXX = 0;
-      probingTrialErrors.forEach(pt => {
-        sumX += pt.x;
-        sumY += pt.y;
-        sumXY += pt.x * pt.y;
-        sumXX += pt.x * pt.x;
-      });
-      const denom = (n * sumXX - sumX * sumX);
-      const b = denom !== 0 ? (n * sumXY - sumX * sumY) / denom : 0;
-      probingSlope = b.toFixed(3);
-    }
+    const ols = calculateOLS(probingTrialErrors);
+    const probingSlope = probingTrialErrors.length > 1 ? ols.slope.toFixed(3) : '0';
 
     // Phase Stats logic
     const phaseSize = Math.floor(subjectTrials.length / 3);
@@ -1088,7 +1058,7 @@ export const generateProbingLongCSV = (
   return [dataset.probingLongHeaders.join(','), ...dataset.probingLongRowsCSV.map(r => r.join(','))].join('\n');
 };
 
-export const exportExcelWorkbook = (
+export const buildExcelWorkbookBlob = (
   subjects: SubjectData[] | any,
   processedData: ProcessedTrial[] | any,
   manualOverrides: Set<string> | any = new Set(),
@@ -1099,7 +1069,7 @@ export const exportExcelWorkbook = (
   subjectApexConfigs: Record<string, ApexTargetConfig> = {},
   globalBoxPadding: number = 15.0,
   manualZoneOverrides: Record<string, TargetZoneId> = {}
-): void => {
+): Blob => {
   const dataset = computeSummaryDataset(
     subjects,
     processedData,
@@ -1143,17 +1113,36 @@ export const exportExcelWorkbook = (
   XLSX.utils.book_append_sheet(wb, ws2, 'По этапам');
   XLSX.utils.book_append_sheet(wb, ws3, 'Попробная динамика (LMM)');
 
-  const dateStr = new Date().toISOString().slice(0, 10);
   const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
-  const blob = new Blob([wbout], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `sigma_summary_statistics_${dateStr}.xlsx`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return new Blob([wbout], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+};
+
+export const exportExcelWorkbook = (
+  subjects: SubjectData[] | any,
+  processedData: ProcessedTrial[] | any,
+  manualOverrides: Set<string> | any = new Set(),
+  excludedLines: Set<string> | any = new Set(),
+  subjectGroups: Record<string, string> | any = {},
+  excludedSubjects: Set<string> | any = new Set(),
+  excludedTrials: Set<string> | any = new Set(),
+  subjectApexConfigs: Record<string, ApexTargetConfig> = {},
+  globalBoxPadding: number = 15.0,
+  manualZoneOverrides: Record<string, TargetZoneId> = {}
+): void => {
+  const blob = buildExcelWorkbookBlob(
+    subjects,
+    processedData,
+    manualOverrides,
+    excludedLines,
+    subjectGroups,
+    excludedSubjects,
+    excludedTrials,
+    subjectApexConfigs,
+    globalBoxPadding,
+    manualZoneOverrides
+  );
+  const dateStr = new Date().toISOString().slice(0, 10);
+  downloadBlob(blob, `sigma_summary_statistics_${dateStr}.xlsx`);
 };
 
 export const generateKinematicsCSV = (

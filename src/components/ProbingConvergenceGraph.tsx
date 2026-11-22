@@ -5,42 +5,14 @@ import {
   CheckCircle2, AlertCircle, Sparkles, RotateCcw, SlidersHorizontal, ShieldCheck, Check
 } from 'lucide-react';
 import { extractTrialApexOvershoot } from '../geometry';
+import {
+  ProbingPoint,
+  calculateSubjectProbingMetrics,
+  calculateAllSolversSeries,
+  calculateGroupSeries
+} from '../probing';
 
-interface ProbingConvergenceGraphProps {
-  trials: ProcessedTrial[];
-  nodes: GridNode[];
-  calibration?: Calibration;
-  selectedTrialId: string | number | null;
-  onSelectTrial?: (trialId: string | number) => void;
-  excludedTrials?: Set<string>;
-  subjectId: string;
-  allSubjects?: SubjectData[];
-  allProcessedData?: ProcessedTrial[];
-  subjectGroups?: Record<string, string>;
-  excludedSubjects?: Set<string>;
-  apexConfig?: ApexTargetConfig;
-  onUpdateApexConfig?: (updates: Partial<ApexTargetConfig>) => void;
-  onResetApexConfig?: () => void;
-  onAutoAlignApex?: () => void;
-  onBatchAutoAlignAllSolvers?: () => void;
-  isCurrentSubjectSolved?: boolean;
-  subjectApexConfigs?: Record<string, ApexTargetConfig>;
-  globalBoxPadding?: number;
-  onUpdateGlobalBoxPadding?: (pad: number) => void;
-  manualZoneOverrides?: Record<string, TargetZoneId>;
-}
-
-export interface ProbingPoint {
-  trialId: string | number;
-  trialNum: number;
-  overshootPx: number;
-  deltaL: number;
-  absDeltaL: number;
-  status: 'hit' | 'undershoot' | 'overshoot' | 'inside';
-  isExcluded: boolean;
-  hasChordLine: boolean;
-  activeZoneName?: string | null;
-}
+export type { ProbingPoint } from '../probing';
 
 export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = ({
   trials,
@@ -89,342 +61,37 @@ export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = (
 
   // Single Subject Metrics calculation
   const { points, slope, rSquared, avgErrorFirstThird, avgErrorLastThird } = useMemo(() => {
-    if (!trials || trials.length === 0 || !nodes || nodes.length < 9) {
-      return { points: [], slope: 0, rSquared: 0, avgErrorFirstThird: 0, avgErrorLastThird: 0 };
-    }
-
-    const pts: ProbingPoint[] = [];
-
-    trials.forEach((t, idx) => {
-      const isExcluded = excludedTrials.has(`${subjectId}-${t.trialId}`);
-      const isSolutionTrial = (idx === trials.length - 1) && !!isCurrentSubjectSolved;
-      const trialKey = `${subjectId}-${t.trialId}`;
-      const manualOverrideZone = manualZoneOverrides[trialKey] || null;
-
-      const apexRes = extractTrialApexOvershoot(t, nodes, {
-        idealStep: currentIdealOvershoot,
-        tolerance: currentToleranceMargin,
-        boxPadding: globalBoxPadding ?? 15.0,
-        isSolvedTrial: isSolutionTrial,
-        solveOverride,
-        capMaxError,
-        overrideZoneId: manualOverrideZone
-      });
-
-      const hasChord = t.lines.some(l => l.type === 'хордовая');
-
-      pts.push({
-        trialId: t.trialId,
-        trialNum: idx + 1,
-        overshootPx: apexRes.overshootPx,
-        deltaL: apexRes.deltaL,
-        absDeltaL: apexRes.absDeltaL,
-        status: apexRes.status,
-        isExcluded,
-        hasChordLine: hasChord,
-        activeZoneName: apexRes.activeZoneName
-      });
+    return calculateSubjectProbingMetrics(trials, nodes, {
+      subjectId,
+      apexConfig,
+      isCurrentSubjectSolved,
+      excludedTrials,
+      manualZoneOverrides,
+      globalBoxPadding
     });
-
-    // Linear regression on non-excluded points
-    const validPts = pts.filter(p => !p.isExcluded);
-    let regSlope = 0;
-    let r2 = 0;
-
-    if (validPts.length > 1) {
-      const n = validPts.length;
-      let sumX = 0;
-      let sumY = 0;
-      let sumXY = 0;
-      let sumXX = 0;
-      let sumYY = 0;
-
-      validPts.forEach(p => {
-        sumX += p.trialNum;
-        sumY += p.absDeltaL;
-        sumXY += p.trialNum * p.absDeltaL;
-        sumXX += p.trialNum * p.trialNum;
-        sumYY += p.absDeltaL * p.absDeltaL;
-      });
-
-      const denom = (n * sumXX - sumX * sumX);
-      if (denom !== 0) {
-        regSlope = (n * sumXY - sumX * sumY) / denom;
-        const numR = (n * sumXY - sumX * sumY);
-        const denR = Math.sqrt((n * sumXX - sumX * sumX) * (n * sumYY - sumY * sumY));
-        if (denR !== 0) {
-          r2 = Math.pow(numR / denR, 2);
-        }
-      }
-    }
-
-    // Comparison: first third vs last third
-    const thirdSize = Math.max(1, Math.floor(validPts.length / 3));
-    const firstThird = validPts.slice(0, thirdSize);
-    const lastThird = validPts.slice(validPts.length - thirdSize);
-
-    const avgFirst = firstThird.length > 0 
-      ? firstThird.reduce((s, p) => s + p.absDeltaL, 0) / firstThird.length 
-      : 0;
-    const avgLast = lastThird.length > 0 
-      ? lastThird.reduce((s, p) => s + p.absDeltaL, 0) / lastThird.length 
-      : 0;
-
-    return {
-      points: pts,
-      slope: regSlope,
-      rSquared: r2,
-      avgErrorFirstThird: Math.round(avgFirst),
-      avgErrorLastThird: Math.round(avgLast)
-    };
-  }, [trials, nodes, excludedTrials, subjectId, currentIdealOvershoot, currentToleranceMargin, solveOverride, capMaxError, isCurrentSubjectSolved]);
+  }, [trials, nodes, subjectId, apexConfig, isCurrentSubjectSolved, excludedTrials, manualZoneOverrides, globalBoxPadding]);
 
   // Population metrics for ALL successful solvers across ALL groups combined
   const allSolversSeries = useMemo(() => {
-    if (!allSubjects || allSubjects.length === 0 || !allProcessedData || allProcessedData.length === 0) {
-      return {
-        solversCount: 0,
-        points: [] as { trialNum: number; avgError: number; count: number }[],
-        slope: 0,
-        rSquared: 0,
-        avgFirstThird: 0,
-        avgLastThird: 0
-      };
-    }
-
-    const solvers = allSubjects.filter(s => s.isSolved && !excludedSubjects.has(s.id));
-    if (solvers.length === 0) {
-      return {
-        solversCount: 0,
-        points: [] as { trialNum: number; avgError: number; count: number }[],
-        slope: 0,
-        rSquared: 0,
-        avgFirstThird: 0,
-        avgLastThird: 0
-      };
-    }
-
-    const trialsBySubject = new Map<string, ProcessedTrial[]>();
-    allProcessedData.forEach(t => {
-      if (excludedTrials.has(`${t.subjectId}-${t.trialId}`)) return;
-      if (!trialsBySubject.has(t.subjectId)) trialsBySubject.set(t.subjectId, []);
-      trialsBySubject.get(t.subjectId)!.push(t);
+    return calculateAllSolversSeries(allSubjects, allProcessedData, {
+      excludedSubjects,
+      excludedTrials,
+      subjectApexConfigs,
+      manualZoneOverrides,
+      globalBoxPadding
     });
-
-    let maxTrials = 0;
-    const solverTrialsList: { errorByTrial: Map<number, number> }[] = [];
-
-    solvers.forEach(s => {
-      const subTrials = trialsBySubject.get(s.id) || [];
-      if (subTrials.length > maxTrials) maxTrials = subTrials.length;
-
-      const subApexConfig = subjectApexConfigs[s.id] || s.apexConfig || {
-        idealOvershoot: 116.0,
-        toleranceMargin: 65.0,
-        solveOverride: false,
-        capMaxError: false
-      };
-
-      const errorMap = new Map<number, number>();
-      subTrials.forEach((t, idx) => {
-        const isSolution = (idx === subTrials.length - 1);
-        const trialKey = `${s.id}-${t.trialId}`;
-        const manualOverrideZone = manualZoneOverrides[trialKey] || null;
-
-        const apexRes = extractTrialApexOvershoot(t, s.nodes, {
-          idealStep: subApexConfig.idealOvershoot,
-          tolerance: subApexConfig.toleranceMargin,
-          boxPadding: globalBoxPadding ?? 15.0,
-          isSolvedTrial: isSolution,
-          solveOverride: !!subApexConfig.solveOverride,
-          capMaxError: !!subApexConfig.capMaxError,
-          overrideZoneId: manualOverrideZone
-        });
-        errorMap.set(idx + 1, apexRes.absDeltaL);
-      });
-
-      solverTrialsList.push({ errorByTrial: errorMap });
-    });
-
-    const pts: { trialNum: number; avgError: number; count: number }[] = [];
-    for (let tNum = 1; tNum <= maxTrials; tNum++) {
-      let sum = 0;
-      let count = 0;
-      solverTrialsList.forEach(st => {
-        if (st.errorByTrial.has(tNum)) {
-          sum += st.errorByTrial.get(tNum)!;
-          count++;
-        }
-      });
-      if (count > 0) {
-        pts.push({ trialNum: tNum, avgError: Math.round(sum / count), count });
-      }
-    }
-
-    let slopeVal = 0;
-    let r2Val = 0;
-    if (pts.length > 1) {
-      const n = pts.length;
-      let sumX = 0, sumY = 0, sumXY = 0, sumXX = 0, sumYY = 0;
-      pts.forEach(p => {
-        sumX += p.trialNum;
-        sumY += p.avgError;
-        sumXY += p.trialNum * p.avgError;
-        sumXX += p.trialNum * p.trialNum;
-        sumYY += p.avgError * p.avgError;
-      });
-      const denom = (n * sumXX - sumX * sumX);
-      if (denom !== 0) {
-        slopeVal = (n * sumXY - sumX * sumY) / denom;
-        const numR = (n * sumXY - sumX * sumY);
-        const denR = Math.sqrt((n * sumXX - sumX * sumX) * (n * sumYY - sumY * sumY));
-        if (denR !== 0) r2Val = Math.pow(numR / denR, 2);
-      }
-    }
-
-    const thirdSize = Math.max(1, Math.floor(pts.length / 3));
-    const firstThird = pts.slice(0, thirdSize);
-    const lastThird = pts.slice(pts.length - thirdSize);
-    const avgFirst = firstThird.length > 0 ? firstThird.reduce((s, p) => s + p.avgError, 0) / firstThird.length : 0;
-    const avgLast = lastThird.length > 0 ? lastThird.reduce((s, p) => s + p.avgError, 0) / lastThird.length : 0;
-
-    return {
-      solversCount: solvers.length,
-      points: pts,
-      slope: +slopeVal.toFixed(2),
-      rSquared: +r2Val.toFixed(2),
-      avgFirstThird: Math.round(avgFirst),
-      avgLastThird: Math.round(avgLast)
-    };
-  }, [allSubjects, allProcessedData, excludedSubjects, excludedTrials, subjectApexConfigs]);
+  }, [allSubjects, allProcessedData, excludedSubjects, excludedTrials, subjectApexConfigs, manualZoneOverrides, globalBoxPadding]);
 
   // Group Comparison calculation (for solvers grouped by experimental condition)
   const groupSeries = useMemo(() => {
-    if (!allSubjects || allSubjects.length === 0 || !allProcessedData || allProcessedData.length === 0) {
-      return [];
-    }
-
-    const solvers = allSubjects.filter(s => s.isSolved && !excludedSubjects.has(s.id));
-    if (solvers.length === 0) return [];
-
-    const trialsBySubject = new Map<string, ProcessedTrial[]>();
-    allProcessedData.forEach(t => {
-      if (excludedTrials.has(`${t.subjectId}-${t.trialId}`)) return;
-      if (!trialsBySubject.has(t.subjectId)) trialsBySubject.set(t.subjectId, []);
-      trialsBySubject.get(t.subjectId)!.push(t);
+    return calculateGroupSeries(allSubjects, allProcessedData, subjectGroups, {
+      excludedSubjects,
+      excludedTrials,
+      subjectApexConfigs,
+      manualZoneOverrides,
+      globalBoxPadding
     });
-
-    const groupsMap = new Map<string, SubjectData[]>();
-    solvers.forEach(s => {
-      const gName = subjectGroups[s.id] || s.group || 'Без группы';
-      if (!groupsMap.has(gName)) groupsMap.set(gName, []);
-      groupsMap.get(gName)!.push(s);
-    });
-
-    const colors = [
-      { stroke: '#10b981', fill: '#10b981' }, // Emerald
-      { stroke: '#a855f7', fill: '#a855f7' }, // Purple
-      { stroke: '#f59e0b', fill: '#f59e0b' }, // Amber
-      { stroke: '#38bdf8', fill: '#38bdf8' }, // Sky
-      { stroke: '#f43f5e', fill: '#f43f5e' }, // Rose
-      { stroke: '#06b6d4', fill: '#06b6d4' }  // Cyan
-    ];
-
-    const results: {
-      groupName: string;
-      color: { stroke: string; fill: string };
-      solversCount: number;
-      points: { trialNum: number; avgError: number; count: number }[];
-      slope: number;
-      rSquared: number;
-    }[] = [];
-
-    let colorIdx = 0;
-    groupsMap.forEach((gSolvers, gName) => {
-      let maxTrials = 0;
-      const solverTrialsList: { errorByTrial: Map<number, number> }[] = [];
-
-      gSolvers.forEach(s => {
-        const subTrials = trialsBySubject.get(s.id) || [];
-        if (subTrials.length > maxTrials) maxTrials = subTrials.length;
-
-        const subApexConfig = subjectApexConfigs[s.id] || s.apexConfig || {
-          idealOvershoot: 116.0,
-          toleranceMargin: 65.0,
-          solveOverride: false,
-          capMaxError: false
-        };
-
-        const errorMap = new Map<number, number>();
-        subTrials.forEach((t, idx) => {
-          const isSolution = (idx === subTrials.length - 1);
-          const trialKey = `${s.id}-${t.trialId}`;
-          const manualOverrideZone = manualZoneOverrides[trialKey] || null;
-
-          const apexRes = extractTrialApexOvershoot(t, s.nodes, {
-            idealStep: subApexConfig.idealOvershoot,
-            tolerance: subApexConfig.toleranceMargin,
-            boxPadding: globalBoxPadding ?? 15.0,
-            isSolvedTrial: isSolution,
-            solveOverride: !!subApexConfig.solveOverride,
-            capMaxError: !!subApexConfig.capMaxError,
-            overrideZoneId: manualOverrideZone
-          });
-          errorMap.set(idx + 1, apexRes.absDeltaL);
-        });
-
-        solverTrialsList.push({ errorByTrial: errorMap });
-      });
-
-      const pts: { trialNum: number; avgError: number; count: number }[] = [];
-      for (let tNum = 1; tNum <= maxTrials; tNum++) {
-        let sum = 0;
-        let count = 0;
-        solverTrialsList.forEach(st => {
-          if (st.errorByTrial.has(tNum)) {
-            sum += st.errorByTrial.get(tNum)!;
-            count++;
-          }
-        });
-        if (count > 0) {
-          pts.push({ trialNum: tNum, avgError: Math.round(sum / count), count });
-        }
-      }
-
-      let slopeVal = 0;
-      let r2Val = 0;
-      if (pts.length > 1) {
-        const n = pts.length;
-        let sumX = 0, sumY = 0, sumXY = 0, sumXX = 0, sumYY = 0;
-        pts.forEach(p => {
-          sumX += p.trialNum;
-          sumY += p.avgError;
-          sumXY += p.trialNum * p.avgError;
-          sumXX += p.trialNum * p.trialNum;
-          sumYY += p.avgError * p.avgError;
-        });
-        const denom = (n * sumXX - sumX * sumX);
-        if (denom !== 0) {
-          slopeVal = (n * sumXY - sumX * sumY) / denom;
-          const numR = (n * sumXY - sumX * sumY);
-          const denR = Math.sqrt((n * sumXX - sumX * sumX) * (n * sumYY - sumY * sumY));
-          if (denR !== 0) r2Val = Math.pow(numR / denR, 2);
-        }
-      }
-
-      results.push({
-        groupName: gName,
-        color: colors[colorIdx % colors.length],
-        solversCount: gSolvers.length,
-        points: pts,
-        slope: +slopeVal.toFixed(2),
-        rSquared: +r2Val.toFixed(2)
-      });
-      colorIdx++;
-    });
-
-    return results;
-  }, [allSubjects, allProcessedData, subjectGroups, excludedSubjects, excludedTrials, subjectApexConfigs]);
+  }, [allSubjects, allProcessedData, subjectGroups, excludedSubjects, excludedTrials, subjectApexConfigs, manualZoneOverrides, globalBoxPadding]);
 
   // Dimensions for SVG rendering
   const width = 420;

@@ -73,6 +73,36 @@ export const distToSegment = (p: Point, a: Point, b: Point): number => {
   return Math.hypot(p.x - (a.x + t * (b.x - a.x)), p.y - (a.y + t * (b.y - a.y)));
 };
 
+/**
+ * Checks whether a given point falls inside a grid node's ellipse of attraction (AoI).
+ */
+export const isPointInNode = (p: Point, node: GridNode, hitPadding = 15): boolean => {
+  const rx = (node.w / 2) + hitPadding;
+  const ry = (node.h / 2) + hitPadding;
+  const dx = (p.x - node.x) / rx;
+  const dy = (p.y - node.y) / ry;
+  return (dx * dx + dy * dy) <= 1.0;
+};
+
+/**
+ * Checks whether a given point falls inside ANY grid node in the matrix.
+ */
+export const isPointInAnyNode = (p: Point, nodes: GridNode[], hitPadding = 15): boolean => {
+  return nodes.some(node => isPointInNode(p, node, hitPadding));
+};
+
+/**
+ * Computes total cumulative Euclidean path length in pixels along a sequence of points.
+ */
+export const getLineLengthPx = (points: Point[]): number => {
+  if (!points || points.length < 2) return 0;
+  let sum = 0;
+  for (let i = 0; i < points.length - 1; i++) {
+    sum += Math.hypot(points[i + 1].x - points[i].x, points[i + 1].y - points[i].y);
+  }
+  return sum;
+};
+
 export const classifyLine = (nodesVisited: number[]): string => {
   const nodes = Array.from(new Set(nodesVisited)).sort((a, b) => a - b);
 

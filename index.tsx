@@ -16,7 +16,8 @@ import {
 import {
   CANVAS_SIZE, DOT_RADIUS, ANGLE_THRESHOLD_SPLIT, MIN_LINE_LENGTH, LOOKAHEAD_MIN_LENGTH,
   SMOOTHING_WINDOW, smoothPoints, getAngle, calculateDistance, distToSegment, classifyLine,
-  performSegmentation, recalculateLineNodes, calibrateTrial, extractTrialApexOvershoot
+  performSegmentation, recalculateLineNodes, calibrateTrial, extractTrialApexOvershoot,
+  isPointInAnyNode
 } from './src/geometry';
 import {
   parseNum, detectDelimiter, decodeBuffer, processCSV
@@ -26,6 +27,10 @@ import {
 } from './src/stats';
 import { KinematicsVelocityGraph } from './src/components/KinematicsVelocityGraph';
 import { ProbingConvergenceGraph } from './src/components/ProbingConvergenceGraph';
+import { TrialCanvasStage } from './src/components/TrialCanvasStage';
+import { autoAlignSolverApex, batchAutoAlignAllSolvers } from './src/probing';
+import { serializeSession, deserializeSession } from './src/session';
+import { downloadText } from './src/utils/download';
 
 
 const GlobalHeatMap: React.FC<{ 
@@ -507,46 +512,15 @@ const App: React.FC = () => {
     const subTrials = processedData.filter(t => t.subjectId === subId && !excludedTrials.has(`${subId}-${t.trialId}`));
     if (subTrials.length === 0) return;
 
-    // Last trial of successful solver is the solution trial
-    const lastTrial = subTrials[subTrials.length - 1];
-    const apexRes = extractTrialApexOvershoot(lastTrial, sub.nodes, {
-      idealStep: 116,
-      tolerance: 65,
-      boxPadding: globalBoxPadding
-    });
-
-    let solutionOvershoot = 116;
-    let alignedTrialId = lastTrial.trialId;
-
-    if (apexRes.hasExit && apexRes.overshootPx > 10) {
-      solutionOvershoot = Math.round(apexRes.overshootPx);
-    } else {
-      // Find candidate trial with maximum exit
-      let maxExit = 0;
-      let bestTrial = lastTrial;
-      subTrials.forEach(t => {
-        const res = extractTrialApexOvershoot(t, sub.nodes, {
-          idealStep: 116,
-          tolerance: 65,
-          boxPadding: globalBoxPadding
-        });
-        if (res.hasExit && res.overshootPx > maxExit) {
-          maxExit = res.overshootPx;
-          bestTrial = t;
-        }
+    const alignResult = autoAlignSolverApex(sub, subTrials, globalBoxPadding);
+    if (alignResult) {
+      updateApexConfig(subId, {
+        idealOvershoot: alignResult.idealOvershoot,
+        isAutoAligned: true,
+        alignedTrialId: alignResult.alignedTrialId
       });
-      if (maxExit > 10) {
-        solutionOvershoot = Math.round(maxExit);
-        alignedTrialId = bestTrial.trialId;
-      }
+      showToast(`Целевая зона выровнена по финальному решению: ${alignResult.idealOvershoot} px`, 'success');
     }
-
-    updateApexConfig(subId, {
-      idealOvershoot: solutionOvershoot,
-      isAutoAligned: true,
-      alignedTrialId
-    });
-    showToast(`Целевая зона выровнена по финальному решению: ${solutionOvershoot} px`, 'success');
   }, [subjects, processedData, excludedTrials, updateApexConfig, globalBoxPadding]);
 
   const handleBatchAutoAlignAllSolvers = useCallback(() => {
@@ -556,58 +530,13 @@ const App: React.FC = () => {
       return;
     }
 
-    const newConfigs: Record<string, ApexTargetConfig> = {};
-    let alignedCount = 0;
-
-    solvedSubs.forEach(sub => {
-      const subTrials = processedData.filter(t => t.subjectId === sub.id && !excludedTrials.has(`${sub.id}-${t.trialId}`));
-      if (subTrials.length === 0) return;
-
-      const lastTrial = subTrials[subTrials.length - 1];
-      const apexRes = extractTrialApexOvershoot(lastTrial, sub.nodes, {
-        idealStep: 116,
-        tolerance: 65,
-        boxPadding: globalBoxPadding
-      });
-
-      let solutionOvershoot = 116;
-      let alignedTrialId = lastTrial.trialId;
-
-      if (apexRes.hasExit && apexRes.overshootPx > 10) {
-        solutionOvershoot = Math.round(apexRes.overshootPx);
-      } else {
-        let maxExit = 0;
-        let bestTrial = lastTrial;
-        subTrials.forEach(t => {
-          const res = extractTrialApexOvershoot(t, sub.nodes, {
-            idealStep: 116,
-            tolerance: 65,
-            boxPadding: globalBoxPadding
-          });
-          if (res.hasExit && res.overshootPx > maxExit) {
-            maxExit = res.overshootPx;
-            bestTrial = t;
-          }
-        });
-        if (maxExit > 10) {
-          solutionOvershoot = Math.round(maxExit);
-          alignedTrialId = bestTrial.trialId;
-        }
-      }
-
-      const existingCfg = subjectApexConfigs[sub.id] || sub.apexConfig;
-      newConfigs[sub.id] = {
-        idealOvershoot: solutionOvershoot,
-        toleranceMargin: existingCfg?.toleranceMargin ?? 65.0,
-        boxPadding: globalBoxPadding,
-        isAutoAligned: true,
-        alignedTrialId,
-        solveOverride: existingCfg?.solveOverride ?? false,
-        capMaxError: existingCfg?.capMaxError ?? false
-      };
-      alignedCount++;
+    const newConfigs = batchAutoAlignAllSolvers(solvedSubs, processedData, {
+      existingConfigs: subjectApexConfigs,
+      excludedTrials,
+      globalBoxPadding
     });
 
+    const alignedCount = Object.keys(newConfigs).length;
     setSubjectApexConfigs(prev => ({ ...prev, ...newConfigs }));
     showToast(`⚡ Автокоррекция целевых зон выполнена для всех ${alignedCount} решивших!`, 'success');
     addLog(`Автокоррекция целевых зон выполнена для ${alignedCount} решивших участников.`);
@@ -655,12 +584,7 @@ const App: React.FC = () => {
   const [showHeatmap, setShowHeatmap] = useState(false);
   const [showFinishHeatmap, setShowFinishHeatmap] = useState(false);
   const [isCalibrating, setIsCalibrating] = useState(false);
-  const [isDraggingGrid, setIsDraggingGrid] = useState(false);
-  const [dragStartMouse, setDragStartMouse] = useState({ x: 0, y: 0 });
-  const [dragStartCalibration, setDragStartCalibration] = useState({ offsetX: 0, offsetY: 0 });
-  const [isHoveringAnyNode, setIsHoveringAnyNode] = useState(false);
   const [animationTick, setAnimationTick] = useState(0);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
   const requestRef = useRef<number>(null);
 
   const activeSubject = useMemo(() => subjects.find(s => s.id === activeSubjectId), [subjects, activeSubjectId]);
@@ -669,22 +593,6 @@ const App: React.FC = () => {
     if (!activeSubjectId) return [];
     return processedData.filter(t => t.subjectId === activeSubjectId);
   }, [processedData, activeSubjectId]);
-
-  // Wheel zoom with native event listener to strictly prevent page scroll
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const handleWheelNative = (e: WheelEvent) => {
-      e.preventDefault();
-      const delta = e.deltaY < 0 ? 1.15 : 0.85;
-      setAutoFit(false);
-      setZoom(z => Math.max(0.15, Math.min(5, +(z * delta).toFixed(2))));
-    };
-    canvas.addEventListener('wheel', handleWheelNative, { passive: false });
-    return () => {
-      canvas.removeEventListener('wheel', handleWheelNative);
-    };
-  }, [activeTab, activeSubjectId]);
   
   const activeNodes = useMemo(() => {
     if (!activeSubject) return [];
@@ -723,36 +631,7 @@ const App: React.FC = () => {
     };
   }, [isCalibrating]);
 
-  const recalculateNodesVisited = (trials: ProcessedTrial[], nodes: GridNode[], hitPadding: number) => {
-    return trials.map(trial => {
-      const updatedLines = trial.lines.map(line => {
-        const visited: number[] = [];
-        for (let i = 0; i < line.points.length - 1; i++) {
-          const p1 = line.points[i];
-          const p2 = line.points[i + 1];
-          nodes.forEach(node => {
-            const rx = (node.w / 2) + hitPadding;
-            const ry = (node.h / 2) + hitPadding;
-            
-            const d = distToSegment(
-              { x: node.x / rx, y: node.y / ry },
-              { x: p1.x / rx, y: p1.y / ry },
-              { x: p2.x / rx, y: p2.y / ry }
-            );
-            if (d <= 1.0) {
-              if (visited[visited.length - 1] !== node.id) visited.push(node.id);
-            }
-          });
-        }
-        return {
-          ...line,
-          nodesVisited: visited,
-          type: classifyLine(visited)
-        };
-      });
-      return { ...trial, lines: updatedLines };
-    });
-  };
+
 
   const handleCalibrationChange = useCallback((changes: Partial<Calibration> | ((prev: Calibration) => Partial<Calibration>)) => {
     if (!activeSubjectId) return;
@@ -1090,144 +969,22 @@ const App: React.FC = () => {
       : filteredTrials;
   }, [selectedTrialId, selectedTrial, filteredTrials]);
 
-  const fitScale = useMemo(() => {
-    if (!autoFit || trialsToDraw.length === 0) return 1;
-
-    let minX = 250, maxX = 550, minY = 250, maxY = 550;
-    trialsToDraw.forEach(t => {
-      t.points.forEach(p => {
-        if (p.x < minX) minX = p.x;
-        if (p.x > maxX) maxX = p.x;
-        if (p.y < minY) minY = p.y;
-        if (p.y > maxY) maxY = p.y;
-      });
-    });
-
-    const maxDistX = Math.max(CANVAS_SIZE / 2 - minX, maxX - CANVAS_SIZE / 2);
-    const maxDistY = Math.max(CANVAS_SIZE / 2 - minY, maxY - CANVAS_SIZE / 2);
-    const maxDist = Math.max(maxDistX, maxDistY);
-
-    if (maxDist > 360) {
-      return Math.max(0.15, +(360 / maxDist).toFixed(3));
-    }
-    return 1;
-  }, [autoFit, trialsToDraw]);
-
-  const currentScale = +(zoom * fitScale).toFixed(3);
-
-  const getCanvasCoords = (e: React.MouseEvent) => {
-    const rect = canvasRef.current?.getBoundingClientRect();
-    if (!rect) return { x: 0, y: 0 };
-    const cx = (e.clientX - rect.left) * (CANVAS_SIZE / rect.width);
-    const cy = (e.clientY - rect.top) * (CANVAS_SIZE / rect.height);
-    const x = (cx - CANVAS_SIZE / 2) / currentScale + CANVAS_SIZE / 2 - panOffset.x;
-    const y = (cy - CANVAS_SIZE / 2) / currentScale + CANVAS_SIZE / 2 - panOffset.y;
-    return { x, y };
-  };
-
-  const handleMainCanvasMouseDown = (e: React.MouseEvent) => {
-    if (!activeSubject) return;
-    const { x, y } = getCanvasCoords(e);
-
-    if (isCalibrating) {
-      setIsDraggingGrid(true);
-      setDragStartMouse({ x, y });
-      setDragStartCalibration({ 
-        offsetX: activeSubject.calibration.offsetX, 
-        offsetY: activeSubject.calibration.offsetY 
-      });
-      return;
-    }
-
-    // Check hit-testing on the 8 target zone circles for manual researcher override
-    if (activeNodes.length >= 9) {
-      const xs = activeNodes.map(n => n.x);
-      const ys = activeNodes.map(n => n.y);
-      const rawMinX = Math.min(...xs);
-      const rawMaxX = Math.max(...xs);
-      const rawMinY = Math.min(...ys);
-      const rawMaxY = Math.max(...ys);
-
-      const currentApexCfg = getApexConfig(activeSubject.id);
-      const step = currentApexCfg ? currentApexCfg.idealOvershoot : (activeCellSize.w || 116);
-      const tolRadius = currentApexCfg ? currentApexCfg.toleranceMargin : 65;
-      const boxPad = globalBoxPadding;
-
-      const minX = rawMinX - boxPad;
-      const maxX = rawMaxX + boxPad;
-      const minY = rawMinY - boxPad;
-      const maxY = rawMaxY + boxPad;
-
-      const targetZones = [
-        { id: 'TR_H' as TargetZoneId, name: 'Справа-сверху (гор.)', x: maxX + step, y: rawMinY },
-        { id: 'TR_V' as TargetZoneId, name: 'Сверху-справа (верт.)', x: rawMaxX, y: minY - step },
-        { id: 'BR_H' as TargetZoneId, name: 'Справа-снизу (гор.)', x: maxX + step, y: rawMaxY },
-        { id: 'BR_V' as TargetZoneId, name: 'Снизу-справа (верт.)', x: rawMaxX, y: maxY + step },
-        { id: 'BL_H' as TargetZoneId, name: 'Слева-снизу (гор.)', x: minX - step, y: rawMaxY },
-        { id: 'BL_V' as TargetZoneId, name: 'Снизу-слева (верт.)', x: rawMinX, y: maxY + step },
-        { id: 'TL_H' as TargetZoneId, name: 'Слева-сверху (гор.)', x: minX - step, y: rawMinY },
-        { id: 'TL_V' as TargetZoneId, name: 'Сверху-слева (верт.)', x: rawMinX, y: minY - step }
-      ];
-
-      const clickedZone = targetZones.find(z => Math.hypot(x - z.x, y - z.y) <= (tolRadius + 10));
-
-      if (clickedZone) {
-        const effectiveTrialId = selectedTrialId !== null ? selectedTrialId : activeSubjectTrials[activeSubjectTrials.length - 1]?.trialId;
-        if (effectiveTrialId !== undefined) {
-          const trialKey = `${activeSubject.id}-${effectiveTrialId}`;
-          const isAlreadyOverridden = manualZoneOverrides[trialKey] === clickedZone.id;
-
-          setManualZoneOverrides(prev => {
-            const next = { ...prev };
-            if (isAlreadyOverridden) {
-              delete next[trialKey];
-              showToast(`Сброшен ручной выбор: включено автоопределение для пробы #${effectiveTrialId}`, 'info');
-              addLog(`Сброшен ручной выбор зоны для пробы #${effectiveTrialId}.`);
-            } else {
-              next[trialKey] = clickedZone.id;
-              showToast(`🎯 Зона для пробы #${effectiveTrialId} зафиксирована вручную: ${clickedZone.name}`, 'success');
-              addLog(`Целевая зона для пробы #${effectiveTrialId} зафиксирована вручную: ${clickedZone.name}.`);
-            }
-            return next;
-          });
-          return; // Consumed click as manual zone override, do not start canvas pan
-        }
+  const handleToggleManualZoneOverride = useCallback((trialKey: string, zoneId: TargetZoneId, zoneName: string) => {
+    setManualZoneOverrides(prev => {
+      const isAlreadyOverridden = prev[trialKey] === zoneId;
+      const next = { ...prev };
+      if (isAlreadyOverridden) {
+        delete next[trialKey];
+        showToast(`Сброшен ручной выбор: включено автоопределение для целевой зоны`, 'info');
+        addLog(`Сброшен ручной выбор зоны для ${trialKey}.`);
+      } else {
+        next[trialKey] = zoneId;
+        showToast(`🎯 Зона зафиксирована вручную: ${zoneName}`, 'success');
+        addLog(`Целевая зона зафиксирована вручную: ${zoneName} (${trialKey}).`);
       }
-    }
-
-    setIsPanning(true);
-    setPanStart({ x: e.clientX - panOffset.x, y: e.clientY - panOffset.y });
-  };
-
-  const handleMainCanvasMouseMove = (e: React.MouseEvent) => {
-    if (isCalibrating && isDraggingGrid && activeSubject) {
-      const { x, y } = getCanvasCoords(e);
-      const dx = x - dragStartMouse.x;
-      const dy = y - dragStartMouse.y;
-
-      handleCalibrationChange({
-        offsetX: Math.round(dragStartCalibration.offsetX + dx),
-        offsetY: Math.round(dragStartCalibration.offsetY + dy)
-      });
-    } else if (isPanning) {
-      setPanOffset({
-        x: e.clientX - panStart.x,
-        y: e.clientY - panStart.y
-      });
-    }
-  };
-
-  const handleMainCanvasMouseUp = () => {
-    setIsDraggingGrid(false);
-    setIsPanning(false);
-  };
-
-  const handleMainCanvasWheel = (e: React.WheelEvent) => {
-    e.preventDefault();
-    setAutoFit(false);
-    const factor = e.deltaY < 0 ? 1.15 : 0.85;
-    setZoom(z => Math.max(0.15, Math.min(5, +(z * factor).toFixed(2))));
-  };
+      return next;
+    });
+  }, []);
 
   const getNormalizedPoint = useCallback((point: Point, trial: ProcessedTrial, sub: SubjectData) => {
     const centerNode = sub.nodes.find(n => n.id === 5);
@@ -1416,366 +1173,13 @@ const App: React.FC = () => {
     return groups;
   }, [subjects, processedData, getNormalizedPoint]);
 
-  useEffect(() => {
-    const ctx = canvasRef.current?.getContext('2d');
-    if (!ctx) return;
 
-    // Fill soft light-grey background (gentle on eyes, high contrast)
-    ctx.fillStyle = '#eef2f6';
-    ctx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
 
-    if (activeNodes.length === 0) {
-      ctx.fillStyle = '#64748b';
-      ctx.font = 'bold 15px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText('Загрузите CSV файлы для отображения решения «9 точек»', CANVAS_SIZE / 2, CANVAS_SIZE / 2);
-      return;
-    }
 
-    ctx.save();
-    
-    const viewScale = currentScale;
-    ctx.translate(CANVAS_SIZE / 2, CANVAS_SIZE / 2);
-    ctx.scale(currentScale, currentScale);
-    ctx.translate(-CANVAS_SIZE / 2 + panOffset.x, -CANVAS_SIZE / 2 + panOffset.y);
 
-    const pulse = isCalibrating ? Math.sin(animationTick / 300) * 0.5 + 0.5 : 0;
 
-    if (showHeatmap && filteredTrials.length > 0) {
-      ctx.globalCompositeOperation = 'multiply';
-      filteredTrials.forEach(t => {
-        const radius = (activeCellSize.w * 0.6) / viewScale;
-        const grad = ctx.createRadialGradient(t.startPoint.x, t.startPoint.y, 0, t.startPoint.x, t.startPoint.y, radius);
-        grad.addColorStop(0, 'rgba(239, 68, 68, 0.15)');
-        grad.addColorStop(1, 'rgba(239, 68, 68, 0)');
-        ctx.fillStyle = grad;
-        ctx.beginPath();
-        ctx.arc(t.startPoint.x, t.startPoint.y, radius, 0, Math.PI * 2);
-        ctx.fill();
-      });
-      ctx.globalCompositeOperation = 'source-over';
-    }
 
-    if (showFinishHeatmap && filteredTrials.length > 0) {
-      ctx.globalCompositeOperation = 'multiply';
-      filteredTrials.forEach(t => {
-        const lastPoint = t.points[t.points.length - 1];
-        const radius = (activeCellSize.w * 0.6) / viewScale;
-        const grad = ctx.createRadialGradient(lastPoint.x, lastPoint.y, 0, lastPoint.x, lastPoint.y, radius);
-        grad.addColorStop(0, 'rgba(16, 185, 129, 0.15)');
-        grad.addColorStop(1, 'rgba(16, 185, 129, 0)');
-        ctx.fillStyle = grad;
-        ctx.beginPath();
-        ctx.arc(lastPoint.x, lastPoint.y, radius, 0, Math.PI * 2);
-        ctx.fill();
-      });
-      ctx.globalCompositeOperation = 'source-over';
-    }
 
-    // 8 Canonical 4-corner turn zones (116px step outside 9 dots)
-    if (activeNodes.length >= 9) {
-      const xs = activeNodes.map(n => n.x);
-      const ys = activeNodes.map(n => n.y);
-      const rawMinX = Math.min(...xs);
-      const rawMaxX = Math.max(...xs);
-      const rawMinY = Math.min(...ys);
-      const rawMaxY = Math.max(...ys);
-
-      const currentApexCfg = activeSubject ? getApexConfig(activeSubject.id) : null;
-      const step = currentApexCfg ? currentApexCfg.idealOvershoot : (activeCellSize.w || 116);
-      const tolRadius = currentApexCfg ? currentApexCfg.toleranceMargin : 45;
-      const boxPad = globalBoxPadding;
-
-      const minX = rawMinX - boxPad;
-      const maxX = rawMaxX + boxPad;
-      const minY = rawMinY - boxPad;
-      const maxY = rawMaxY + boxPad;
-
-      const targetZones = [
-        { id: 'TR_H', name: 'Справа-сверху (гор.)', x: maxX + step, y: rawMinY },
-        { id: 'TR_V', name: 'Сверху-справа (верт.)', x: rawMaxX, y: minY - step },
-        { id: 'BR_H', name: 'Справа-снизу (гор.)', x: maxX + step, y: rawMaxY },
-        { id: 'BR_V', name: 'Снизу-справа (верт.)', x: rawMaxX, y: maxY + step },
-        { id: 'BL_H', name: 'Слева-снизу (гор.)', x: minX - step, y: rawMaxY },
-        { id: 'BL_V', name: 'Снизу-слева (верт.)', x: rawMinX, y: maxY + step },
-        { id: 'TL_H', name: 'Слева-сверху (гор.)', x: minX - step, y: rawMinY },
-        { id: 'TL_V', name: 'Сверху-слева (верт.)', x: rawMinX, y: minY - step }
-      ];
-
-      // Draw bounding perceptual box
-      ctx.save();
-      ctx.strokeStyle = 'rgba(245, 158, 11, 0.6)';
-      ctx.lineWidth = 2 / viewScale;
-      ctx.setLineDash([6 / viewScale, 4 / viewScale]);
-      ctx.strokeRect(minX, minY, maxX - minX, maxY - minY);
-
-      // Determine active zone for selected trial (supports manual researcher override)
-      const isSolutionTrial = selectedTrial && activeSubject && activeSubject.isSolved && 
-        (selectedTrial.trialId === activeSubjectTrials[activeSubjectTrials.length - 1]?.trialId);
-
-      const trialKey = selectedTrial && activeSubject ? `${activeSubject.id}-${selectedTrial.trialId}` : '';
-      const manualOverrideZone = trialKey ? manualZoneOverrides[trialKey] : null;
-
-      const apexRes = selectedTrial ? extractTrialApexOvershoot(selectedTrial, activeNodes, {
-        idealStep: step,
-        tolerance: tolRadius,
-        boxPadding: boxPad,
-        isSolvedTrial: isSolutionTrial,
-        solveOverride: !!currentApexCfg?.solveOverride,
-        capMaxError: !!currentApexCfg?.capMaxError,
-        overrideZoneId: manualOverrideZone || null
-      }) : null;
-
-      const activeZoneId = apexRes && apexRes.hasExit ? apexRes.activeZoneId : null;
-      const isManualZone = !!manualOverrideZone;
-
-      // Draw all 8 zones
-      targetZones.forEach(z => {
-        const isActive = z.id === activeZoneId;
-        ctx.beginPath();
-        ctx.arc(z.x, z.y, tolRadius / viewScale, 0, Math.PI * 2);
-
-        if (isActive) {
-          if (isManualZone) {
-            ctx.fillStyle = 'rgba(234, 179, 8, 0.25)'; // Amber highlight for manual override
-            ctx.fill();
-            ctx.strokeStyle = '#eab308'; // amber-500
-            ctx.lineWidth = 3 / viewScale;
-            ctx.setLineDash([]);
-            ctx.stroke();
-
-            ctx.fillStyle = '#ca8a04';
-            ctx.font = `bold ${9 / viewScale}px sans-serif`;
-            ctx.textAlign = 'center';
-            ctx.fillText(`🎯 ВРУЧНУЮ: ${z.name.toUpperCase()} (кликните для сброса)`, z.x, z.y - ((tolRadius + 5) / viewScale));
-            if (apexRes) {
-              ctx.fillStyle = '#a16207';
-              ctx.font = `bold ${8 / viewScale}px monospace`;
-              ctx.fillText(`L_вылет: ${apexRes.overshootPx} px (ΔL: ${apexRes.deltaL > 0 ? '+' : ''}${apexRes.deltaL} px)`, z.x, z.y + ((tolRadius + 13) / viewScale));
-            }
-          } else {
-            ctx.fillStyle = 'rgba(16, 185, 129, 0.22)';
-            ctx.fill();
-            ctx.strokeStyle = '#10b981';
-            ctx.lineWidth = 2.5 / viewScale;
-            ctx.setLineDash([]);
-            ctx.stroke();
-
-            ctx.fillStyle = '#059669';
-            ctx.font = `bold ${9 / viewScale}px sans-serif`;
-            ctx.textAlign = 'center';
-            ctx.fillText(`🎯 ЦЕЛЕВАЯ ЗОНА: ${z.name.toUpperCase()} (${Math.round(step)}px, ±${Math.round(tolRadius)}px)`, z.x, z.y - ((tolRadius + 5) / viewScale));
-            if (apexRes) {
-              ctx.fillStyle = '#047857';
-              ctx.font = `bold ${8 / viewScale}px monospace`;
-              ctx.fillText(`L_вылет: ${apexRes.overshootPx} px (ΔL: ${apexRes.deltaL > 0 ? '+' : ''}${apexRes.deltaL} px)`, z.x, z.y + ((tolRadius + 13) / viewScale));
-            }
-          }
-
-          // Draw guide line from apex turn point to target zone
-          if (apexRes && apexRes.turnPoint) {
-            ctx.beginPath();
-            ctx.moveTo(apexRes.turnPoint.x, apexRes.turnPoint.y);
-            ctx.lineTo(z.x, z.y);
-            ctx.strokeStyle = isManualZone ? 'rgba(234, 179, 8, 0.7)' : 'rgba(16, 185, 129, 0.6)';
-            ctx.lineWidth = 1.5 / viewScale;
-            ctx.setLineDash([4 / viewScale, 3 / viewScale]);
-            ctx.stroke();
-          }
-        } else {
-          ctx.fillStyle = 'rgba(16, 185, 129, 0.04)';
-          ctx.fill();
-          ctx.strokeStyle = 'rgba(16, 185, 129, 0.35)';
-          ctx.lineWidth = 1 / viewScale;
-          ctx.setLineDash([4 / viewScale, 3 / viewScale]);
-          ctx.stroke();
-        }
-      });
-      ctx.restore();
-    }
-
-    activeNodes.forEach(node => {
-      const hitPadding = activeSubject?.calibration.hitPadding || 0;
-      const hitW = node.w + hitPadding * 2;
-      const hitH = node.h + hitPadding * 2;
-
-      if (isCalibrating) {
-        ctx.beginPath();
-        ctx.ellipse(node.x, node.y, hitW / 2, hitH / 2, 0, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(249, 115, 22, ${0.05 + pulse * 0.1})`;
-        ctx.fill();
-        ctx.strokeStyle = `rgba(249, 115, 22, ${0.3 + pulse * 0.4})`;
-        ctx.lineWidth = 2 / viewScale;
-        ctx.setLineDash([5 / viewScale, 3 / viewScale]);
-        ctx.stroke();
-        ctx.setLineDash([]);
-        
-        const glowRadius = (Math.max(node.w, node.h) / 2 + 4 + pulse * 4) / viewScale;
-        const gradient = ctx.createRadialGradient(node.x, node.y, 0, node.x, node.y, glowRadius);
-        gradient.addColorStop(0, `rgba(249, 115, 22, ${0.8 * pulse})`);
-        gradient.addColorStop(1, 'rgba(249, 115, 22, 0)');
-        ctx.fillStyle = gradient;
-        ctx.beginPath();
-        ctx.arc(node.x, node.y, glowRadius, 0, Math.PI * 2);
-        ctx.fill();
-      }
-      
-      const isStartNode = filterStartNode === node.id;
-      const isFinishNode = filterFinishNode === node.id;
-      
-      if (!isCalibrating) {
-        ctx.beginPath();
-        ctx.ellipse(node.x, node.y, hitW / 2, hitH / 2, 0, 0, Math.PI * 2);
-        if (isStartNode) {
-          ctx.strokeStyle = 'rgba(239, 68, 68, 0.4)';
-          ctx.lineWidth = 2 / viewScale;
-        } else if (isFinishNode) {
-          ctx.strokeStyle = 'rgba(16, 185, 129, 0.4)';
-          ctx.lineWidth = 2 / viewScale;
-        } else {
-          ctx.strokeStyle = 'rgba(203, 213, 225, 0.15)';
-          ctx.lineWidth = 1 / viewScale;
-        }
-        ctx.stroke();
-      }
-      
-      ctx.beginPath();
-      const nodeW = (node.w || DOT_RADIUS * 2) / viewScale;
-      const nodeH = (node.h || DOT_RADIUS * 2) / viewScale;
-      ctx.ellipse(node.x, node.y, nodeW / 2, nodeH / 2, 0, 0, Math.PI * 2);
-      ctx.fillStyle = isCalibrating ? '#f97316' : '#0f172a';
-      ctx.shadowBlur = isCalibrating ? 15 * pulse : 0;
-      ctx.shadowColor = '#f97316';
-      ctx.fill();
-      ctx.shadowBlur = 0;
-      ctx.strokeStyle = isCalibrating ? '#ea580c' : '#334155';
-      ctx.lineWidth = 1.5 / viewScale;
-      ctx.stroke();
-      
-      if (isCalibrating) {
-        ctx.fillStyle = 'white';
-        ctx.font = `bold ${8 / viewScale}px sans-serif`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(node.id.toString(), node.x, node.y);
-      }
-    });
-
-    // Draw 9-dots bounding box in Kinematics or Duplex mode
-    if ((analysisMode === 'kinematics' || analysisMode === 'duplex') && activeNodes.length >= 9) {
-      const xs = activeNodes.map(n => n.x);
-      const ys = activeNodes.map(n => n.y);
-      const minX = Math.min(...xs);
-      const maxX = Math.max(...xs);
-      const minY = Math.min(...ys);
-      const maxY = Math.max(...ys);
-      
-      ctx.save();
-      ctx.strokeStyle = 'rgba(245, 158, 11, 0.45)';
-      ctx.lineWidth = 1.5 / viewScale;
-      ctx.setLineDash([6 / viewScale, 4 / viewScale]);
-      ctx.strokeRect(minX, minY, maxX - minX, maxY - minY);
-      
-      ctx.fillStyle = 'rgba(245, 158, 11, 0.75)';
-      ctx.font = `bold ${8 / viewScale}px sans-serif`;
-      ctx.textAlign = 'right';
-      ctx.fillText('РАМКА 9 ТОЧЕК', maxX, minY - (4 / viewScale));
-      ctx.restore();
-    }
-
-    const trialsToDraw = selectedTrialId !== null 
-      ? (selectedTrial ? [selectedTrial] : [])
-      : filteredTrials;
-
-    trialsToDraw.forEach(trial => {
-      const isSelected = selectedTrialId === trial.trialId;
-      const isHovered = hoveredTrialId === trial.trialId;
-      const overrideKey = `${trial.subjectId}-${trial.trialId}`;
-      const isOverridden = manualOverrides.has(overrideKey);
-      
-      trial.lines.forEach((line, lIdx) => {
-        const type = isOverridden ? 'прочая' : line.type;
-        const isTargetType = filterTypes.size === 0 || filterTypes.has(type);
-        
-        ctx.beginPath();
-        ctx.moveTo(line.points[0].x, line.points[0].y);
-        line.points.forEach(p => ctx.lineTo(p.x, p.y));
-        
-        if (isHovered && !isSelected) {
-            ctx.shadowBlur = 10 / viewScale;
-            ctx.shadowColor = 'rgba(59, 130, 246, 0.8)';
-            ctx.lineWidth = 6 / viewScale;
-            ctx.strokeStyle = 'rgba(59, 130, 246, 0.3)';
-            ctx.stroke();
-            ctx.shadowBlur = 0;
-        }
-
-        ctx.lineWidth = (isSelected ? 5 : (isTargetType ? 3 : 0.5)) / viewScale;
-        ctx.strokeStyle = isSelected 
-          ? 'rgba(37, 99, 235, 1)' 
-          : (isTargetType ? (isOverridden ? 'rgba(148, 163, 184, 0.6)' : 'rgba(59, 130, 246, 0.6)') : 'rgba(203, 213, 225, 0.2)');
-        
-        ctx.lineJoin = 'round';
-        ctx.lineCap = 'round';
-        ctx.stroke();
-
-        if (isSelected && line.points.length > 5) {
-          const midIdx = Math.floor(line.points.length / 2);
-          const p1 = line.points[midIdx - 2];
-          const p2 = line.points[midIdx + 2];
-          if (p1 && p2) {
-            const angle = Math.atan2(p2.y - p1.y, p2.x - p1.x);
-            ctx.beginPath();
-            ctx.save();
-            ctx.translate(p2.x, p2.y);
-            ctx.rotate(angle);
-            ctx.moveTo(0, 0);
-            ctx.lineTo(-10 / viewScale, -5 / viewScale);
-            ctx.lineTo(-10 / viewScale, 5 / viewScale);
-            ctx.closePath();
-            ctx.fillStyle = 'rgba(37, 99, 235, 1)';
-            ctx.fill();
-            ctx.restore();
-          }
-        }
-      });
-
-      if (showBreaks || isSelected || isHovered) {
-        trial.breakPoints.forEach(bp => {
-          ctx.beginPath();
-          ctx.arc(bp.x, bp.y, (isSelected || isHovered ? 4 : 3) / viewScale, 0, Math.PI * 2);
-          ctx.fillStyle = isOverridden ? 'rgba(148, 163, 184, 0.5)' : '#fbbf24';
-          ctx.fill();
-        });
-      }
-
-      ctx.beginPath();
-      ctx.arc(trial.startPoint.x, trial.startPoint.y, (isSelected || isHovered ? 6 : 4) / viewScale, 0, Math.PI * 2);
-      ctx.fillStyle = isOverridden ? 'rgba(148, 163, 184, 0.4)' : 'rgba(239, 68, 68, 0.7)';
-      ctx.fill();
-
-      if (isSelected) {
-        trial.lines.forEach((line, lIdx) => {
-          if (line.nodesVisited.length > 0) {
-            const lastNodeId = line.nodesVisited[line.nodesVisited.length - 1];
-            const lastNode = activeNodes.find(n => n.id === lastNodeId);
-            if (lastNode) {
-              ctx.shadowBlur = 4 / viewScale;
-              ctx.shadowColor = 'white';
-              ctx.fillStyle = '#2563eb';
-              ctx.font = `bold ${14 / viewScale}px sans-serif`;
-              ctx.textAlign = 'center';
-              const nodeY = lastNode.y as number;
-              ctx.fillText(String(lIdx + 1), lastNode.x, nodeY + (20 / viewScale));
-              ctx.shadowBlur = 0;
-            }
-          }
-        });
-      }
-    });
-
-    ctx.restore();
-  }, [activeNodes, activeCellSize, filteredTrials, currentScale, panOffset, filterStartNode, filterFinishNode, filterTypes, filterOverridesOnly, showBreaks, showHeatmap, showFinishHeatmap, manualOverrides, selectedTrialId, hoveredTrialId, processedData, activeSubjectId, isCalibrating, animationTick, selectedTrial]);
 
   const toggleLineExclusion = (subjectId: string, trialId: string | number, lineIdx: number) => {
     const key = `${subjectId}-${trialId}-${lineIdx}`;
@@ -1833,13 +1237,7 @@ const App: React.FC = () => {
         })) : [];
         const hitPadding = sub?.calibration.hitPadding ?? 15;
 
-        const isAtNode = (p: Point) => subNodes.some(node => {
-          const rx = (node.w / 2) + hitPadding;
-          const ry = (node.h / 2) + hitPadding;
-          const dx = (p.x - node.x) / rx;
-          const dy = (p.y - node.y) / ry;
-          return (dx * dx + dy * dy) <= 1.0;
-        });
+        const isAtNode = (p: Point) => isPointInAnyNode(p, subNodes, hitPadding);
 
         const overrideKey = `${t.subjectId}-${t.trialId}`;
         const isOverridden = manualOverrides.has(overrideKey);
@@ -2021,31 +1419,19 @@ const App: React.FC = () => {
 
   const exportCSV = () => {
     const csvContent = generateFilteredCSV(filteredTrials, subjects, manualOverrides, subjectGroups);
-    const blob = new Blob([csvContent], { type: 'text/csv' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = `filtered_export_${new Date().toISOString().slice(0, 10)}.csv`;
-    link.click();
+    downloadText(csvContent, `filtered_export_${new Date().toISOString().slice(0, 10)}.csv`, 'text/csv');
   };
 
   const exportAllDataCSV = () => {
     if (processedData.length === 0) return;
     const csvContent = generateAllDataCSV(subjects, processedData, manualOverrides, subjectGroups);
-    const blob = new Blob([csvContent], { type: 'text/csv' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = `MOGNU_geometry_SIGMA_${new Date().toISOString().slice(0, 10)}.csv`;
-    link.click();
+    downloadText(csvContent, `MOGNU_geometry_SIGMA_${new Date().toISOString().slice(0, 10)}.csv`, 'text/csv');
     addLog("Экспортированы геометрические данные (SIGMA).");
   };
 
   const exportStatsCSV = () => {
     const csvContent = generateStatsCSV(subjects, processedData, manualOverrides, excludedLines, subjectGroups, excludedSubjects, excludedTrials, subjectApexConfigs, globalBoxPadding, manualZoneOverrides);
-    const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = `summary_statistics_${new Date().toISOString().slice(0, 10)}.csv`;
-    link.click();
+    downloadText('\uFEFF' + csvContent, `summary_statistics_${new Date().toISOString().slice(0, 10)}.csv`, 'text/csv;charset=utf-8;');
     addLog("Экспортирована сводная статистика (с геометрией и кинематикой MOGNU).");
   };
 
@@ -2066,11 +1452,7 @@ const App: React.FC = () => {
       globalBoxPadding,
       manualZoneOverrides
     );
-    const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = `probing_lmm_long_${new Date().toISOString().slice(0, 10)}.csv`;
-    link.click();
+    downloadText('\uFEFF' + csvContent, `probing_lmm_long_${new Date().toISOString().slice(0, 10)}.csv`, 'text/csv;charset=utf-8;');
     addLog("Экспортирована попробная динамика (Long Format для LMM / GLMM / Survival).");
     showToast("Попробный Long CSV успешно выгружен!", "success");
   };
@@ -2081,29 +1463,13 @@ const App: React.FC = () => {
       return;
     }
     try {
-      // Clean large 1ms high-frequency interpolation arrays from kinematics
-      // to keep session JSON lightweight (< 2MB) and prevent browser string allocation overflow
-      const cleanProcessedData = processedData.map(t => {
-        const { kinematics, ...rest } = t;
-        const cleanKinematics = kinematics ? {
-          metrics: kinematics.metrics,
-          peaks: kinematics.peaks,
-          pauses: kinematics.pauses,
-          segments: kinematics.segments
-        } : undefined;
-        return {
-          ...rest,
-          kinematics: cleanKinematics
-        };
-      });
-
-      const sessionData = {
+      const jsonStr = serializeSession({
         subjects,
-        processedData: cleanProcessedData,
-        manualOverrides: Array.from(manualOverrides),
-        excludedLines: Array.from(excludedLines),
-        excludedSubjects: Array.from(excludedSubjects),
-        excludedTrials: Array.from(excludedTrials),
+        processedData,
+        manualOverrides,
+        excludedLines,
+        excludedSubjects,
+        excludedTrials,
         activeSubjectId,
         analysisMode,
         subjectGroups,
@@ -2113,17 +1479,9 @@ const App: React.FC = () => {
         subjectApexConfigs,
         globalBoxPadding,
         manualZoneOverrides
-      };
-
-      const jsonStr = JSON.stringify(sessionData);
-      const blob = new Blob([jsonStr], { type: 'application/json' });
-      const link = document.createElement('a');
-      link.href = URL.createObjectURL(blob);
-      link.download = `session_backup_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.json`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+      });
+      const filename = `session_backup_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.json`;
+      downloadText(jsonStr, filename, 'application/json');
       showToast('Сессия успешно сохранена в JSON', 'success');
       addLog("Сессия экспортирована в JSON.");
     } catch (err: any) {
@@ -2139,38 +1497,25 @@ const App: React.FC = () => {
 
     try {
       const text = await file.text();
-      // Try parsing as JSON first (Session Backup)
       if (file.name.toLowerCase().endsWith('.json')) {
-        const data = JSON.parse(text);
-        const importedSubjects: SubjectData[] = data.subjects || [];
-        const importedAngle = data.angleThreshold || ANGLE_THRESHOLD_SPLIT;
-        const importedMinLen = data.minLineLength || MIN_LINE_LENGTH;
+        const { snapshot, importedAngle, importedMinLen } = deserializeSession(text, ANGLE_THRESHOLD_SPLIT, MIN_LINE_LENGTH);
 
-        if (data.subjects) setSubjects(importedSubjects);
+        setSubjects(snapshot.subjects);
+        setProcessedData(snapshot.processedData);
+        setManualOverrides(snapshot.manualOverrides);
+        setExcludedLines(snapshot.excludedLines);
+        setSubjectGroups(snapshot.subjectGroups);
+        setAngleThreshold(importedAngle);
+        setMinLineLength(importedMinLen);
+        if (snapshot.usePhasedMode !== undefined) setUsePhasedMode(snapshot.usePhasedMode);
+        setExcludedSubjects(snapshot.excludedSubjects);
+        setExcludedTrials(snapshot.excludedTrials);
+        if (snapshot.activeSubjectId) setActiveSubjectId(snapshot.activeSubjectId);
+        if (snapshot.analysisMode) setAnalysisMode(snapshot.analysisMode);
+        setSubjectApexConfigs(snapshot.subjectApexConfigs);
+        if (snapshot.globalBoxPadding !== undefined) setGlobalBoxPadding(snapshot.globalBoxPadding);
+        setManualZoneOverrides(snapshot.manualZoneOverrides);
 
-        if (data.processedData) {
-          // Rehydrate trials with calibration and high-resolution kinematics
-          const rehydrated = (data.processedData as ProcessedTrial[]).map(t => {
-            const sub = importedSubjects.find(s => s.id === t.subjectId);
-            if (!sub) return t;
-            return calibrateTrial(t, sub.calibration, sub.nodes, importedAngle, importedMinLen);
-          });
-          setProcessedData(rehydrated);
-        }
-
-        if (data.manualOverrides) setManualOverrides(new Set(data.manualOverrides));
-        if (data.excludedLines) setExcludedLines(new Set(data.excludedLines));
-        if (data.subjectGroups) setSubjectGroups(data.subjectGroups);
-        if (data.angleThreshold) setAngleThreshold(importedAngle);
-        if (data.minLineLength) setMinLineLength(importedMinLen);
-        if (data.usePhasedMode !== undefined) setUsePhasedMode(data.usePhasedMode);
-        if (data.excludedSubjects) setExcludedSubjects(new Set(data.excludedSubjects));
-        if (data.excludedTrials) setExcludedTrials(new Set(data.excludedTrials));
-        if (data.activeSubjectId) setActiveSubjectId(data.activeSubjectId);
-        if (data.analysisMode) setAnalysisMode(data.analysisMode);
-        if (data.subjectApexConfigs) setSubjectApexConfigs(data.subjectApexConfigs);
-        if (data.globalBoxPadding !== undefined) setGlobalBoxPadding(data.globalBoxPadding);
-        if (data.manualZoneOverrides) setManualZoneOverrides(data.manualZoneOverrides);
         showToast('Сессия успешно загружена из JSON', 'success');
         addLog("Сессия успешно восстановлена из JSON.");
       } else {
@@ -2751,74 +2096,43 @@ const App: React.FC = () => {
                       );
                     })()}
                   </div>
-
-                  {/* Canvas View Controls (Zoom, Reset, 1:1) */}
-                  <div className="flex items-center gap-1 text-xs text-slate-400">
-                    <button
-                      onClick={() => { setAutoFit(false); setZoom(z => Math.max(0.15, +(z * 0.85).toFixed(2))); }}
-                      title="Уменьшить масштаб (-)"
-                      className="p-1 hover:bg-slate-800 text-slate-400 hover:text-white rounded"
-                    >
-                      <ZoomOut size={14} />
-                    </button>
-                    <span className="text-[11px] font-mono font-bold text-slate-300 px-1 min-w-[36px] text-center select-none">
-                      {Math.round(currentScale * 100)}%
-                    </span>
-                    <button
-                      onClick={() => { setAutoFit(false); setZoom(z => Math.min(5, +(z * 1.15).toFixed(2))); }}
-                      title="Увеличить масштаб (+)"
-                      className="p-1 hover:bg-slate-800 text-slate-400 hover:text-white rounded"
-                    >
-                      <ZoomIn size={14} />
-                    </button>
-                    <div className="h-3 w-px bg-slate-700 mx-1" />
-                    <button
-                      onClick={() => { setAutoFit(true); setZoom(1); setPanOffset({ x: 0, y: 0 }); }}
-                      title="Вписать пробу в холст"
-                      className={`px-1.5 py-0.5 rounded text-[11px] font-bold transition-colors ${
-                        autoFit ? 'bg-indigo-600/30 text-indigo-300' : 'hover:bg-slate-800 text-slate-400'
-                      }`}
-                    >
-                      Авто
-                    </button>
-                    <button
-                      onClick={() => { setAutoFit(false); setZoom(1); setPanOffset({ x: 0, y: 0 }); }}
-                      title="Сброс масштаба 100%"
-                      className="px-1.5 py-0.5 rounded text-[11px] font-bold hover:bg-slate-800 text-slate-400 hover:text-white"
-                    >
-                      1:1
-                    </button>
-                  </div>
                 </div>
 
-                {/* Canvas Container */}
-                <div
-                  className="flex-1 relative flex items-center justify-center bg-[#eef2f6] overflow-hidden cursor-crosshair min-h-[300px]"
-                  id="canvasContainer"
-                >
-                  <canvas
-                    ref={canvasRef}
-                    width={CANVAS_SIZE}
-                    height={CANVAS_SIZE}
-                    className={`w-full h-full object-contain bg-[#eef2f6] ${
-                      isCalibrating
-                        ? (isDraggingGrid ? 'cursor-grabbing' : 'cursor-grab')
-                        : (isPanning ? 'cursor-grabbing' : (currentScale > 1 || !autoFit ? 'cursor-grab' : 'cursor-default'))
-                    }`}
-                    onMouseDown={handleMainCanvasMouseDown}
-                    onMouseMove={handleMainCanvasMouseMove}
-                    onMouseUp={handleMainCanvasMouseUp}
-                    onMouseLeave={handleMainCanvasMouseUp}
-                  />
-
-                  {/* Watermark if current trial is excluded */}
-                  {selectedTrialId !== null && activeSubjectId && excludedTrials.has(`${activeSubjectId}-${selectedTrialId}`) && (
-                    <div className="absolute top-4 left-4 bg-rose-600 text-white border border-rose-700 px-3 py-1 rounded-xl text-xs font-bold uppercase tracking-wider backdrop-blur-md flex items-center gap-1.5 shadow-lg">
-                      <Ban size={14} />
-                      <span>Проба исключена из анализа</span>
-                    </div>
-                  )}
-                </div>
+                <TrialCanvasStage
+                  activeSubject={activeSubject}
+                  activeNodes={activeNodes}
+                  activeCellSize={activeCellSize}
+                  trialsToDraw={trialsToDraw}
+                  filteredTrials={filteredTrials}
+                  selectedTrial={selectedTrial}
+                  selectedTrialId={selectedTrialId}
+                  hoveredTrialId={hoveredTrialId}
+                  isCalibrating={isCalibrating}
+                  animationTick={animationTick}
+                  zoom={zoom}
+                  setZoom={setZoom}
+                  autoFit={autoFit}
+                  setAutoFit={setAutoFit}
+                  panOffset={panOffset}
+                  setPanOffset={setPanOffset}
+                  showHeatmap={showHeatmap}
+                  showFinishHeatmap={showFinishHeatmap}
+                  showBreaks={showBreaks}
+                  filterStartNode={filterStartNode}
+                  filterFinishNode={filterFinishNode}
+                  filterTypes={filterTypes}
+                  filterOverridesOnly={filterOverridesOnly}
+                  manualOverrides={manualOverrides}
+                  manualZoneOverrides={manualZoneOverrides}
+                  onToggleManualZoneOverride={handleToggleManualZoneOverride}
+                  onCalibrationChange={handleCalibrationChange}
+                  getApexConfig={getApexConfig}
+                  globalBoxPadding={globalBoxPadding}
+                  excludedTrials={excludedTrials}
+                  activeSubjectId={activeSubjectId}
+                  activeSubjectTrials={activeSubjectTrials}
+                  analysisMode={analysisMode}
+                />
 
                 {/* Trial Ribbon Carousel */}
                 {activeSubject && activeSubjectTrials.length > 0 && (
