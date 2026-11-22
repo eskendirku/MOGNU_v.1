@@ -2208,6 +2208,7 @@ const App: React.FC = () => {
   const [subjectSearch, setSubjectSearch] = useState('');
 
   const [selectedGroupFilter, setSelectedGroupFilter] = useState<string | null>(null);
+  const [solverFilter, setSolverFilter] = useState<'all' | 'solved' | 'unsolved'>('all');
 
   // Dynamic group aggregation across all subjects
   const groupStats = useMemo(() => {
@@ -2233,6 +2234,11 @@ const App: React.FC = () => {
 
   const filteredSubjects = useMemo(() => {
     let list = subjects;
+    if (solverFilter === 'solved') {
+      list = list.filter(s => !!s.isSolved);
+    } else if (solverFilter === 'unsolved') {
+      list = list.filter(s => !s.isSolved);
+    }
     if (selectedGroupFilter !== null) {
       list = list.filter(s => {
         const grp = (subjectGroups[s.id] || s.group || '').trim() || 'Без группы';
@@ -2247,7 +2253,7 @@ const App: React.FC = () => {
       (subjectGroups[s.id] && subjectGroups[s.id].toLowerCase().includes(q)) ||
       (s.group && s.group.toLowerCase().includes(q))
     );
-  }, [subjects, subjectSearch, subjectGroups, selectedGroupFilter]);
+  }, [subjects, subjectSearch, subjectGroups, selectedGroupFilter, solverFilter]);
 
   const solvedCount = useMemo(() => {
     return subjects.filter(s => s.isSolved).length;
@@ -2421,9 +2427,55 @@ const App: React.FC = () => {
               )}
             </div>
 
+            {/* Solver Status Toggle (All / Solved / Unsolved) */}
+            {subjects.length > 0 && (
+              <div className="pt-2 border-t border-slate-800/70">
+                <div className="grid grid-cols-3 gap-1 bg-slate-950 p-0.5 rounded-lg border border-slate-800 text-[10px] font-bold">
+                  <button
+                    onClick={() => setSolverFilter('all')}
+                    className={`py-1 px-1 rounded-md transition-all flex items-center justify-center gap-1 ${
+                      solverFilter === 'all'
+                        ? 'bg-slate-800 text-white shadow-sm'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                    title="Все испытуемые (решившие и не решившие)"
+                  >
+                    <span>Все</span>
+                    <span className="opacity-60 text-[9px]">({subjects.length})</span>
+                  </button>
+                  <button
+                    onClick={() => setSolverFilter('solved')}
+                    className={`py-1 px-1 rounded-md transition-all flex items-center justify-center gap-1 ${
+                      solverFilter === 'solved'
+                        ? 'bg-amber-600 text-white shadow-sm shadow-amber-600/30 font-black'
+                        : 'text-amber-400/90 hover:text-amber-300'
+                    }`}
+                    title="Только успешные решатели (статус РЕШИЛ 🏆)"
+                  >
+                    <Trophy size={11} className={solverFilter === 'solved' ? 'text-white' : 'text-amber-400'} />
+                    <span>Решили</span>
+                    <span className="text-[9px] font-mono opacity-80">({solvedCount})</span>
+                  </button>
+                  <button
+                    onClick={() => setSolverFilter('unsolved')}
+                    className={`py-1 px-1 rounded-md transition-all flex items-center justify-center gap-1 ${
+                      solverFilter === 'unsolved'
+                        ? 'bg-rose-700 text-white shadow-sm font-black'
+                        : 'text-slate-400 hover:text-rose-300'
+                    }`}
+                    title="Только неуспешные участники (не решившие)"
+                  >
+                    <X size={11} className={solverFilter === 'unsolved' ? 'text-white' : 'text-slate-400'} />
+                    <span>Не решили</span>
+                    <span className="text-[9px] font-mono opacity-80">({subjects.length - solvedCount})</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* Dynamic Group Filter & Distribution Chips */}
             {groupStats.length > 0 && (
-              <div className="pt-2 pb-0.5 border-t border-slate-800/70 flex flex-wrap gap-1 px-1 max-h-24 overflow-y-auto custom-scrollbar">
+              <div className="pt-1.5 pb-0.5 flex flex-wrap gap-1 px-1 max-h-24 overflow-y-auto custom-scrollbar">
                 <button
                   onClick={() => setSelectedGroupFilter(null)}
                   className={`px-2 py-0.5 rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 border ${
