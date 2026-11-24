@@ -272,6 +272,8 @@ export interface ApexOvershootResult {
   turnPoint: Point | null;
   startPoint: Point | null;
   overshootPx: number;
+  overshootFromCenterPx?: number;
+  effectiveIdealFromBox?: number;
   deltaL: number;
   absDeltaL: number;
   corridorDeltaL: number;
@@ -289,7 +291,11 @@ export const TARGET_ZONES_DEF: { id: TargetZoneId; name: string }[] = [
   { id: 'TL_V', name: 'Сверху-слева (верт.)' }
 ];
 
-export const getTargetZones = (nodes: GridNode[], step = 116, boxPadding = 15): TargetZoneInfo[] => {
+/**
+ * Returns the 8 target zones anchored to the outer dot centers (`rawMaxX + step`, etc.),
+ * so `step = 116` places the hypothetical 4th dot at exact grid spacing (`2->3 == 3->4*`).
+ */
+export const getTargetZones = (nodes: GridNode[], step = 116, _boxPadding = 15): TargetZoneInfo[] => {
   if (!nodes || nodes.length < 9) return [];
   const xs = nodes.map(n => n.x);
   const ys = nodes.map(n => n.y);
@@ -298,20 +304,15 @@ export const getTargetZones = (nodes: GridNode[], step = 116, boxPadding = 15): 
   const rawMinY = Math.min(...ys);
   const rawMaxY = Math.max(...ys);
 
-  const minX = rawMinX - boxPadding;
-  const maxX = rawMaxX + boxPadding;
-  const minY = rawMinY - boxPadding;
-  const maxY = rawMaxY + boxPadding;
-
   return [
-    { id: 'TR_H', name: 'Справа-сверху (гор.)', x: maxX + step, y: rawMinY },
-    { id: 'TR_V', name: 'Сверху-справа (верт.)', x: rawMaxX, y: minY - step },
-    { id: 'BR_H', name: 'Справа-снизу (гор.)', x: maxX + step, y: rawMaxY },
-    { id: 'BR_V', name: 'Снизу-справа (верт.)', x: rawMaxX, y: maxY + step },
-    { id: 'BL_H', name: 'Слева-снизу (гор.)', x: minX - step, y: rawMaxY },
-    { id: 'BL_V', name: 'Снизу-слева (верт.)', x: rawMinX, y: maxY + step },
-    { id: 'TL_H', name: 'Слева-сверху (гор.)', x: minX - step, y: rawMinY },
-    { id: 'TL_V', name: 'Сверху-слева (верт.)', x: rawMinX, y: minY - step }
+    { id: 'TR_H', name: 'Справа-сверху (гор.)', x: rawMaxX + step, y: rawMinY },
+    { id: 'TR_V', name: 'Сверху-справа (верт.)', x: rawMaxX, y: rawMinY - step },
+    { id: 'BR_H', name: 'Справа-снизу (гор.)', x: rawMaxX + step, y: rawMaxY },
+    { id: 'BR_V', name: 'Снизу-справа (верт.)', x: rawMaxX, y: rawMaxY + step },
+    { id: 'BL_H', name: 'Слева-снизу (гор.)', x: rawMinX - step, y: rawMaxY },
+    { id: 'BL_V', name: 'Снизу-слева (верт.)', x: rawMinX, y: rawMaxY + step },
+    { id: 'TL_H', name: 'Слева-сверху (гор.)', x: rawMinX - step, y: rawMinY },
+    { id: 'TL_V', name: 'Сверху-слева (верт.)', x: rawMinX, y: rawMinY - step }
   ];
 };
 
@@ -362,7 +363,10 @@ export const extractTrialApexOvershoot = (
     overrideZoneId = overrideZoneIdParam;
   }
 
-  const minCorridorNoExit = Math.max(0, idealStep - tolerance);
+  // idealStep (default 116 px) is measured from the outer dot center (rawMaxX),
+  // whereas overshootPx is measured from the perceptual dashed box border (rawMaxX + boxPadding).
+  const effectiveIdealFromBox = Math.max(0, idealStep - boxPadding);
+  const minCorridorNoExit = Math.max(0, effectiveIdealFromBox - tolerance);
   const defaultNoExit: ApexOvershootResult = {
     hasExit: false,
     activeZoneId: null,
@@ -370,9 +374,11 @@ export const extractTrialApexOvershoot = (
     turnPoint: null,
     startPoint: null,
     overshootPx: 0,
-    deltaL: (isSolvedTrial && solveOverride) ? 0 : -idealStep,
-    absDeltaL: (isSolvedTrial && solveOverride) ? 0 : idealStep,
-    corridorDeltaL: (isSolvedTrial && solveOverride) ? 0 : minCorridorNoExit,
+    overshootFromCenterPx: 0,
+    effectiveIdealFromBox: Math.round(effectiveIdealFromBox),
+    deltaL: (isSolvedTrial && solveOverride) ? 0 : -Math.round(effectiveIdealFromBox),
+    absDeltaL: (isSolvedTrial && solveOverride) ? 0 : Math.round(effectiveIdealFromBox),
+    corridorDeltaL: (isSolvedTrial && solveOverride) ? 0 : Math.round(minCorridorNoExit),
     status: (isSolvedTrial && solveOverride) ? 'hit' : 'inside'
   };
 
@@ -543,12 +549,13 @@ export const extractTrialApexOvershoot = (
   }
 
   const overshootPx = Math.round(bestExit.overshootPx);
-  let deltaL = Math.round(overshootPx - idealStep);
+  const overshootFromCenterPx = Math.round(bestExit.overshootPx + boxPadding);
+  let deltaL = Math.round(overshootPx - effectiveIdealFromBox);
   let absDeltaL = Math.abs(deltaL);
   let corridorDeltaL = 0;
 
-  const minCorridor = Math.max(0, idealStep - tolerance);
-  const maxCorridor = idealStep + tolerance;
+  const minCorridor = Math.max(0, effectiveIdealFromBox - tolerance);
+  const maxCorridor = effectiveIdealFromBox + tolerance;
 
   let status: 'hit' | 'undershoot' | 'overshoot' | 'inside' = 'inside';
 
@@ -559,9 +566,9 @@ export const extractTrialApexOvershoot = (
     corridorDeltaL = 0;
     status = 'hit';
   } else {
-    // Option 3: Cap Max Error at baseline step (a large exploratory probe is not penalized more than non-exit)
-    if (capMaxError && absDeltaL > idealStep) {
-      absDeltaL = idealStep;
+    // Option 3: Cap Max Error at baseline distance from perceptual box
+    if (capMaxError && absDeltaL > effectiveIdealFromBox) {
+      absDeltaL = Math.round(effectiveIdealFromBox);
     }
 
     if (absDeltaL <= tolerance) {
@@ -569,14 +576,14 @@ export const extractTrialApexOvershoot = (
       corridorDeltaL = 0;
     } else if (deltaL < -tolerance) {
       status = 'undershoot';
-      corridorDeltaL = Math.max(0, minCorridor - overshootPx);
+      corridorDeltaL = Math.max(0, Math.round(minCorridor - overshootPx));
     } else {
       status = 'overshoot';
-      corridorDeltaL = Math.max(0, overshootPx - maxCorridor);
+      corridorDeltaL = Math.max(0, Math.round(overshootPx - maxCorridor));
     }
 
-    if (capMaxError && corridorDeltaL > idealStep) {
-      corridorDeltaL = idealStep;
+    if (capMaxError && corridorDeltaL > effectiveIdealFromBox) {
+      corridorDeltaL = Math.round(effectiveIdealFromBox);
     }
   }
 
@@ -589,9 +596,216 @@ export const extractTrialApexOvershoot = (
     turnPoint: bestExit.endPoint,
     startPoint: bestExit.startPoint,
     overshootPx,
+    overshootFromCenterPx,
+    effectiveIdealFromBox: Math.round(effectiveIdealFromBox),
     deltaL,
     absDeltaL,
     corridorDeltaL,
     status
+  };
+};
+
+export interface RigidAlignmentResult {
+  offsetX: number;
+  offsetY: number;
+  rmseBefore: number;
+  rmseAfter: number;
+  matchedNodesCount: number;
+}
+
+const minDistToPolyline = (px: number, py: number, pts: Point[]): number => {
+  let minD = Infinity;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const d = distToSegment({ x: px, y: py }, pts[i], pts[i + 1]);
+    if (d < minD) minD = d;
+  }
+  return minD;
+};
+
+/**
+ * Computes rigid translation (offsetX, offsetY) aligning a participant's trajectories
+ * cleanly onto the exact centers of the 9 grid dots without changing scale.
+ */
+export const computeRigidDotAlignment = (
+  trials: ProcessedTrial[],
+  nodes: GridNode[],
+  currentCalibration: Calibration
+): RigidAlignmentResult => {
+  const curOx = currentCalibration?.offsetX ?? 0;
+  const curOy = currentCalibration?.offsetY ?? 0;
+  const scale = currentCalibration?.scale || 1.0;
+
+  if (!trials || trials.length === 0 || !nodes || nodes.length < 9) {
+    return { offsetX: curOx, offsetY: curOy, rmseBefore: 0, rmseAfter: 0, matchedNodesCount: 0 };
+  }
+
+  const center = CANVAS_SIZE / 2;
+  const nodeMap = new Map<number, GridNode>();
+  nodes.forEach(n => nodeMap.set(n.id, n));
+
+  // Build scaled (un-shifted) line polylines anchored to center=400
+  const scaledTrials = trials.map(t => {
+    const basePts = t.basePoints || t.points;
+    const scaledPts = basePts.map(p => ({
+      x: center + (p.x - center) * scale,
+      y: center + (p.y - center) * scale,
+      t: p.t
+    }));
+    const rawLines = t.lines && t.lines.length > 0
+      ? t.lines.map(l => ({
+          pts: l.points.map(p => ({
+            // undo current shift to get scaled-only coords
+            x: p.x - curOx,
+            y: p.y - curOy,
+            t: p.t
+          })),
+          nodesVisited: l.nodesVisited || []
+        }))
+      : [{ pts: scaledPts, nodesVisited: [] as number[] }];
+    return { scaledPts, rawLines };
+  });
+
+  // Collect (targetNode, polyline) pairs from lines with visited nodes
+  let pairs: { node: GridNode; pts: Point[] }[] = [];
+  scaledTrials.forEach(st => {
+    st.rawLines.forEach(l => {
+      if (l.pts.length < 2 || l.nodesVisited.length === 0) return;
+      const stepPts = l.pts.length > 35
+        ? l.pts.filter((_, idx) => idx % 2 === 0 || idx === l.pts.length - 1)
+        : l.pts;
+      l.nodesVisited.forEach(nid => {
+        const nd = nodeMap.get(nid);
+        if (nd) pairs.push({ node: nd, pts: stepPts });
+      });
+    });
+  });
+
+  let startOx = curOx;
+  let startOy = curOy;
+
+  // Fallback for wildly uncalibrated subjects (< 3 visited node pairs): coarse centroid + dot-proximity match
+  if (pairs.length < 3) {
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    scaledTrials.forEach(st => {
+      st.scaledPts.forEach(p => {
+        if (p.x < minX) minX = p.x;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.y > maxY) maxY = p.y;
+      });
+    });
+    if (isFinite(minX)) {
+      startOx = center - (minX + maxX) / 2;
+      startOy = center - (minY + maxY) / 2;
+    }
+
+    // Coarse search +/- 120 px around bounding-box center to maximize nearby node hits
+    const samplePolys = scaledTrials
+      .slice(-8)
+      .map(st => st.scaledPts.filter((_, i) => i % 3 === 0 || i === st.scaledPts.length - 1))
+      .filter(pts => pts.length >= 2);
+
+    let bestCoarseScore = -1e9;
+    let cOx = startOx;
+    let cOy = startOy;
+    for (let dx = -120; dx <= 120; dx += 8) {
+      for (let dy = -120; dy <= 120; dy += 8) {
+        const ox = startOx + dx;
+        const oy = startOy + dy;
+        let hitCount = 0;
+        let errSum = 0;
+        nodes.forEach(nd => {
+          let bestD = Infinity;
+          for (const poly of samplePolys) {
+            const d = minDistToPolyline(nd.x - ox, nd.y - oy, poly);
+            if (d < bestD) bestD = d;
+          }
+          if (bestD <= 26) {
+            hitCount++;
+            errSum += bestD * bestD;
+          } else {
+            errSum += 26 * 26;
+          }
+        });
+        const score = hitCount * 900 - errSum;
+        if (score > bestCoarseScore) {
+          bestCoarseScore = score;
+          cOx = ox;
+          cOy = oy;
+        }
+      }
+    }
+    startOx = cOx;
+    startOy = cOy;
+
+    // Re-collect pairs using this coarse alignment (26 px capture radius)
+    pairs = [];
+    scaledTrials.forEach(st => {
+      st.rawLines.forEach(l => {
+        if (l.pts.length < 2) return;
+        const stepPts = l.pts.length > 35
+          ? l.pts.filter((_, idx) => idx % 2 === 0 || idx === l.pts.length - 1)
+          : l.pts;
+        nodes.forEach(nd => {
+          if (minDistToPolyline(nd.x - startOx, nd.y - startOy, stepPts) <= 28) {
+            pairs.push({ node: nd, pts: stepPts });
+          }
+        });
+      });
+    });
+  }
+
+  if (pairs.length === 0) {
+    return { offsetX: Math.round(startOx * 10) / 10, offsetY: Math.round(startOy * 10) / 10, rmseBefore: 0, rmseAfter: 0, matchedNodesCount: 0 };
+  }
+
+  const evalRmse = (ox: number, oy: number): number => {
+    let sumSq = 0;
+    for (let i = 0; i < pairs.length; i++) {
+      const { node, pts } = pairs[i];
+      const d = minDistToPolyline(node.x - ox, node.y - oy, pts);
+      sumSq += d * d;
+    }
+    return Math.sqrt(sumSq / pairs.length);
+  };
+
+  const rmseBefore = evalRmse(curOx, curOy);
+
+  // Coarse rigid search +/- 48 px step 3 px around startOx/startOy
+  let bestOx = startOx;
+  let bestOy = startOy;
+  let bestRmse = evalRmse(bestOx, bestOy);
+
+  for (let dx = -48; dx <= 48; dx += 3) {
+    for (let dy = -48; dy <= 48; dy += 3) {
+      const r = evalRmse(startOx + dx, startOy + dy);
+      if (r < bestRmse) {
+        bestRmse = r;
+        bestOx = startOx + dx;
+        bestOy = startOy + dy;
+      }
+    }
+  }
+
+  // Fine rigid search +/- 3 px step 0.5 px
+  const fineCenterX = bestOx;
+  const fineCenterY = bestOy;
+  for (let dx = -3; dx <= 3; dx += 0.5) {
+    for (let dy = -3; dy <= 3; dy += 0.5) {
+      const r = evalRmse(fineCenterX + dx, fineCenterY + dy);
+      if (r < bestRmse) {
+        bestRmse = r;
+        bestOx = fineCenterX + dx;
+        bestOy = fineCenterY + dy;
+      }
+    }
+  }
+
+  return {
+    offsetX: Math.round(bestOx * 10) / 10,
+    offsetY: Math.round(bestOy * 10) / 10,
+    rmseBefore: Number(rmseBefore.toFixed(1)),
+    rmseAfter: Number(bestRmse.toFixed(1)),
+    matchedNodesCount: pairs.length
   };
 };

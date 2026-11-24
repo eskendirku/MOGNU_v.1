@@ -152,18 +152,20 @@ export const processCSV = (
   const dx = uniqueX.length > 1 ? (uniqueX[uniqueX.length - 1] - uniqueX[0]) / (uniqueX.length - 1) : 116;
   const dy = uniqueY.length > 1 ? (uniqueY[uniqueY.length - 1] - uniqueY[0]) / (uniqueY.length - 1) : 116;
 
-  // 9 dots stably centered on canvas:
+  // Modern web experiment CSVs (with header) export dot centers (cx, cy) directly,
+  // whereas legacy headerless files stored top-left bounding corners (x, y, w, h).
+  const coordsAreCenters = hasHeader;
   const dot5 = rawCoords.find(c => c.id === 5) || rawCoords[4];
-  const rawCenterX = dot5.x + dot5.w / 2;
-  const rawCenterY = dot5.y + dot5.h / 2;
+  const rawCenterX = coordsAreCenters ? dot5.x : (dot5.x + dot5.w / 2);
+  const rawCenterY = coordsAreCenters ? dot5.y : (dot5.y + dot5.h / 2);
   const centerCanvas = CANVAS_SIZE / 2; // 400
 
   const extractedNodes: GridNode[] = rawCoords.map(c => ({
     id: c.id,
     rawX: c.x,
     rawY: c.y,
-    x: centerCanvas + (c.x + c.w / 2 - rawCenterX),
-    y: centerCanvas + (c.y + c.h / 2 - rawCenterY),
+    x: centerCanvas + ((coordsAreCenters ? c.x : c.x + c.w / 2) - rawCenterX),
+    y: centerCanvas + ((coordsAreCenters ? c.y : c.y + c.h / 2) - rawCenterY),
     w: c.w || DOT_RADIUS * 2,
     h: c.h || DOT_RADIUS * 2
   }));

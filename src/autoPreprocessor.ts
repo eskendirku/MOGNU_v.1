@@ -1,5 +1,5 @@
-import { SubjectData, ProcessedTrial, GridNode, ApexTargetConfig } from './types';
-import { extractTrialApexOvershoot } from './geometry';
+import { SubjectData, ProcessedTrial, GridNode, ApexTargetConfig, Calibration } from './types';
+import { extractTrialApexOvershoot, computeRigidDotAlignment, calibrateTrial, ANGLE_THRESHOLD_SPLIT, MIN_LINE_LENGTH } from './geometry';
 
 /**
  * Verified Ground Truth solvers list for Savinova study cohort
@@ -31,8 +31,9 @@ export interface PreprocessingConfig {
   // --- Solver Identification & Apex ---
   detectSolutions: boolean;            // Default: true (Identify 4-line 9-node solutions and set isSolved)
   useKnownSolversList: boolean;        // Default: true (Synchronize with verified 22 solvers for Savinova cohort)
+  autoAlignTrajectoriesToDots: boolean;// Default: true (Rigidly snap trajectories onto exact 9 dot centers)
   autoAlignApexForSolvers: boolean;    // Default: true (Auto-align turn apex zone for successful solvers)
-  defaultToleranceMargin: number;      // Default: 65.0 px (or 45.0 px)
+  defaultToleranceMargin: number;      // Default: 65.0 px
 }
 
 export const DEFAULT_PREPROCESSING_CONFIG: PreprocessingConfig = {
@@ -51,12 +52,13 @@ export const DEFAULT_PREPROCESSING_CONFIG: PreprocessingConfig = {
 
   detectSolutions: true,
   useKnownSolversList: true,
+  autoAlignTrajectoriesToDots: true,
   autoAlignApexForSolvers: true,
   defaultToleranceMargin: 65.0
 };
 
 export interface PreprocessingLogEntry {
-  type: 'SUBJECT' | 'TRIAL' | 'SOLVER';
+  type: 'SUBJECT' | 'TRIAL' | 'SOLVER' | 'CALIBRATION';
   subjectId: string;
   trialId?: string | number;
   reason: string;
@@ -80,6 +82,8 @@ export interface PreprocessingResult {
   excludedTrials: Set<string>;
   solvedSubjectIds: Set<string>;
   subjectApexConfigs: Record<string, ApexTargetConfig>;
+  alignedSubjectCalibrations: Record<string, Calibration>;
+  recalibratedTrials: ProcessedTrial[];
   stats: {
     totalSubjects: number;
     activeSubjects: number;
@@ -89,6 +93,7 @@ export interface PreprocessingResult {
     excludedTrialsCount: number;
     solvedCount: number;
     apexAlignedCount: number;
+    trajectoriesAlignedCount: number;
     ruleBreakdown: PreprocessingRuleCounts;
   };
   log: PreprocessingLogEntry[];
@@ -112,12 +117,15 @@ function calculatePathLength(points: { x: number; y: number }[]): number {
 export function runDatasetPreprocessing(
   subjects: SubjectData[],
   processedData: ProcessedTrial[],
-  config: PreprocessingConfig = DEFAULT_PREPROCESSING_CONFIG
+  config: PreprocessingConfig = DEFAULT_PREPROCESSING_CONFIG,
+  angleThreshold = ANGLE_THRESHOLD_SPLIT,
+  minLineLength = MIN_LINE_LENGTH
 ): PreprocessingResult {
   const excludedSubjects = new Set<string>();
   const excludedTrials = new Set<string>();
   const solvedSubjectIds = new Set<string>();
   const subjectApexConfigs: Record<string, ApexTargetConfig> = {};
+  const alignedSubjectCalibrations: Record<string, Calibration> = {};
   const log: PreprocessingLogEntry[] = [];
 
   const ruleCounts: PreprocessingRuleCounts = {
@@ -132,8 +140,62 @@ export function runDatasetPreprocessing(
     corruptedSubject: 0
   };
 
+  // ================= STEP 0: RIGID TRAJECTORY ALIGNMENT TO 9 DOTS =================
+  let workingData = processedData;
+  let trajectoriesAlignedCount = 0;
+
+  if (config.autoAlignTrajectoriesToDots) {
+    const rawBySubject = new Map<string, ProcessedTrial[]>();
+    processedData.forEach(t => {
+      const list = rawBySubject.get(t.subjectId) || [];
+      list.push(t);
+      rawBySubject.set(t.subjectId, list);
+    });
+
+    const recalibratedByKey = new Map<string, ProcessedTrial>();
+
+    subjects.forEach(sub => {
+      if (!sub.nodes || sub.nodes.length < 9) return;
+      const subTrials = rawBySubject.get(sub.id) || [];
+      if (subTrials.length === 0) return;
+
+      const align = computeRigidDotAlignment(subTrials, sub.nodes, sub.calibration);
+      const dx = Math.abs(align.offsetX - (sub.calibration?.offsetX ?? 0));
+      const dy = Math.abs(align.offsetY - (sub.calibration?.offsetY ?? 0));
+
+      if (dx >= 1.0 || dy >= 1.0) {
+        const nextCal: Calibration = {
+          ...(sub.calibration || { offsetX: 0, offsetY: 0, scale: 1.0, hitPadding: 15 }),
+          offsetX: align.offsetX,
+          offsetY: align.offsetY
+        };
+        alignedSubjectCalibrations[sub.id] = nextCal;
+        trajectoriesAlignedCount++;
+
+        subTrials.forEach(t => {
+          recalibratedByKey.set(
+            `${sub.id}-${t.trialId}`,
+            calibrateTrial(t, nextCal, sub.nodes, angleThreshold, minLineLength)
+          );
+        });
+
+        log.push({
+          type: 'CALIBRATION',
+          subjectId: sub.id,
+          trialId: 'ALL',
+          reason: 'rigid_dot_alignment',
+          details: `Сдвиг X=${align.offsetX}, Y=${align.offsetY} (RMSE ${align.rmseBefore} → ${align.rmseAfter} px)`
+        });
+      }
+    });
+
+    if (recalibratedByKey.size > 0) {
+      workingData = processedData.map(t => recalibratedByKey.get(`${t.subjectId}-${t.trialId}`) || t);
+    }
+  }
+
   const trialsBySubject = new Map<string, ProcessedTrial[]>();
-  processedData.forEach(t => {
+  workingData.forEach(t => {
     const list = trialsBySubject.get(t.subjectId) || [];
     list.push(t);
     trialsBySubject.set(t.subjectId, list);
@@ -200,7 +262,7 @@ export function runDatasetPreprocessing(
   const subjectsMap = new Map<string, SubjectData>();
   subjects.forEach(s => subjectsMap.set(s.id, s));
 
-  processedData.forEach(trial => {
+  workingData.forEach(trial => {
     const subId = trial.subjectId;
     if (excludedSubjects.has(subId)) return;
 
@@ -343,10 +405,11 @@ export function runDatasetPreprocessing(
           let alignedTrialId = lastTrial.trialId;
 
           if (apexRes.hasExit && apexRes.overshootPx > 10.0) {
-            solutionOvershoot = Math.round(apexRes.overshootPx);
+            solutionOvershoot = Math.round(apexRes.overshootFromCenterPx ?? (apexRes.overshootPx + config.boxPaddingPx));
           } else {
             // Fallback: look for trial with maximum exit overshoot
             let maxExit = 0;
+            let bestCenterOvershoot = 116.0;
             subTrials.forEach(t => {
               const resT = extractTrialApexOvershoot(t, sub.nodes, {
                 idealStep: 116.0,
@@ -355,18 +418,20 @@ export function runDatasetPreprocessing(
               });
               if (resT.hasExit && resT.overshootPx > maxExit) {
                 maxExit = resT.overshootPx;
+                bestCenterOvershoot = resT.overshootFromCenterPx ?? (resT.overshootPx + config.boxPaddingPx);
                 alignedTrialId = t.trialId;
               }
             });
             if (maxExit > 10.0) {
-              solutionOvershoot = Math.round(maxExit);
+              solutionOvershoot = Math.round(bestCenterOvershoot);
             }
           }
 
-          solutionOvershoot = Math.max(25, Math.min(250, solutionOvershoot));
+          solutionOvershoot = Math.max(40, Math.min(280, solutionOvershoot));
           subjectApexConfigs[sub.id] = {
             idealOvershoot: solutionOvershoot,
             toleranceMargin: config.defaultToleranceMargin,
+            isCenterAnchored: true,
             isAutoAligned: true,
             alignedTrialId,
             solveOverride: false,
@@ -379,22 +444,25 @@ export function runDatasetPreprocessing(
   }
 
   const activeSubjectsCount = subjects.length - excludedSubjects.size;
-  const activeTrialsCount = processedData.length - excludedTrials.size;
+  const activeTrialsCount = workingData.length - excludedTrials.size;
 
   return {
     excludedSubjects,
     excludedTrials,
     solvedSubjectIds,
     subjectApexConfigs,
+    alignedSubjectCalibrations,
+    recalibratedTrials: workingData,
     stats: {
       totalSubjects: subjects.length,
       activeSubjects: activeSubjectsCount,
       excludedSubjectsCount: excludedSubjects.size,
-      totalTrials: processedData.length,
+      totalTrials: workingData.length,
       activeTrials: activeTrialsCount,
       excludedTrialsCount: excludedTrials.size,
       solvedCount,
       apexAlignedCount,
+      trajectoriesAlignedCount,
       ruleBreakdown: ruleCounts
     },
     log

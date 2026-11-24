@@ -12,13 +12,13 @@ import {
 } from 'lucide-react';
 
 import {
-  Point, LineSegment, ProcessedTrial, GridNode, Calibration, SubjectData, HeatPoint, HeatLine, AnalysisMode, ApexTargetConfig
+  Point, LineSegment, ProcessedTrial, GridNode, Calibration, SubjectData, HeatPoint, HeatLine, AnalysisMode, ApexTargetConfig, TargetZoneId
 } from './src/types';
 import {
   CANVAS_SIZE, DOT_RADIUS, ANGLE_THRESHOLD_SPLIT, MIN_LINE_LENGTH, LOOKAHEAD_MIN_LENGTH,
   SMOOTHING_WINDOW, smoothPoints, getAngle, calculateDistance, distToSegment, classifyLine,
   performSegmentation, recalculateLineNodes, calibrateTrial, extractTrialApexOvershoot,
-  isPointInAnyNode
+  isPointInAnyNode, computeRigidDotAlignment
 } from './src/geometry';
 import {
   parseNum, detectDelimiter, decodeBuffer, processCSV
@@ -475,6 +475,7 @@ const App: React.FC = () => {
       idealOvershoot: 116.0,
       toleranceMargin: 65.0,
       isAutoAligned: false,
+      isCenterAnchored: true,
       solveOverride: false,
       capMaxError: false
     };
@@ -488,10 +489,12 @@ const App: React.FC = () => {
           idealOvershoot: 116.0,
           toleranceMargin: 65.0,
           isAutoAligned: false,
+          isCenterAnchored: true,
           solveOverride: false,
           capMaxError: false
         }),
-        ...updates
+        ...updates,
+        ...(updates.idealOvershoot !== undefined ? { isCenterAnchored: updates.isCenterAnchored ?? true } : {})
       }
     }));
   }, []);
@@ -503,12 +506,13 @@ const App: React.FC = () => {
         idealOvershoot: 116.0,
         toleranceMargin: 65.0,
         isAutoAligned: false,
+        isCenterAnchored: true,
         alignedTrialId: undefined,
         solveOverride: false,
         capMaxError: false
       }
     }));
-    showToast('Параметры целевой зоны сброшены к базовым (116 px / ±65 px)', 'info');
+    showToast('Параметры целевой зоны сброшены к базовым (116 px от т.3 / ±65 px)', 'info');
   }, []);
 
   const handleAutoAlignApex = useCallback((subId: string) => {
@@ -525,9 +529,10 @@ const App: React.FC = () => {
       updateApexConfig(subId, {
         idealOvershoot: alignResult.idealOvershoot,
         isAutoAligned: true,
+        isCenterAnchored: true,
         alignedTrialId: alignResult.alignedTrialId
       });
-      showToast(`Целевая зона выровнена по финальному решению: ${alignResult.idealOvershoot} px`, 'success');
+      showToast(`Целевая зона выровнена по финальному решению: ${alignResult.idealOvershoot} px (от ц. т.3)`, 'success');
     }
   }, [subjects, processedData, excludedTrials, updateApexConfig, globalBoxPadding]);
 
@@ -645,7 +650,7 @@ const App: React.FC = () => {
     }
 
     const cfg = customConfig || preprocessingConfig;
-    const result = runDatasetPreprocessing(subjects, processedData, cfg);
+    const result = runDatasetPreprocessing(subjects, processedData, cfg, debouncedAngle, debouncedMinLen);
 
     // Apply excluded subjects
     setExcludedSubjects(result.excludedSubjects);
@@ -653,11 +658,21 @@ const App: React.FC = () => {
     // Apply excluded trials
     setExcludedTrials(result.excludedTrials);
 
-    // Apply isSolved status to subjects
+    // Apply isSolved status and rigid trajectory-to-dot calibrations to subjects
     setSubjects(prev => prev.map(s => {
       const isSolved = result.solvedSubjectIds.has(s.id);
-      return { ...s, isSolved };
+      const nextCal = result.alignedSubjectCalibrations[s.id];
+      return {
+        ...s,
+        isSolved,
+        calibration: nextCal ? nextCal : s.calibration
+      };
     }));
+
+    // Apply recalibrated trials if any subject calibration was adjusted in Step 0
+    if (result.stats.trajectoriesAlignedCount > 0) {
+      setProcessedData(result.recalibratedTrials);
+    }
 
     // Apply apex configs for solvers
     setSubjectApexConfigs(prev => ({
@@ -674,9 +689,9 @@ const App: React.FC = () => {
     }
 
     setLastPreprocessingResult(result);
-    showToast(`⚡ Предобработка завершена: исключено ${result.stats.excludedSubjectsCount} исп., ${result.stats.excludedTrialsCount} проб, выявлено ${result.stats.solvedCount} решений`, 'success');
-    addLog(`Выполнена автоматическая предобработка (отсеяно ${result.stats.excludedSubjectsCount} исп., ${result.stats.excludedTrialsCount} проб, ${result.stats.solvedCount} решений).`);
-  }, [subjects, processedData, preprocessingConfig, activeSubjectId]);
+    showToast(`⚡ Предобработка: выровнено ${result.stats.trajectoriesAlignedCount} траект., исключено ${result.stats.excludedSubjectsCount} исп., ${result.stats.excludedTrialsCount} проб, ${result.stats.solvedCount} решений`, 'success');
+    addLog(`Выполнена автоматическая предобработка (выровнено по 9 т.: ${result.stats.trajectoriesAlignedCount}, отсеяно ${result.stats.excludedSubjectsCount} исп., ${result.stats.excludedTrialsCount} проб, ${result.stats.solvedCount} решений).`);
+  }, [subjects, processedData, preprocessingConfig, activeSubjectId, debouncedAngle, debouncedMinLen]);
 
   const toggleExcludeSubject = (sId: string) => {
     const newExcluded = new Set(excludedSubjects);
@@ -1007,34 +1022,68 @@ const App: React.FC = () => {
 
   const handleAutoCenter = useCallback(() => {
     if (!activeSubject) return;
-    const subTrials = processedData.filter(t => t.subjectId === activeSubject.id);
+    const activeSubTrials = processedData.filter(t => t.subjectId === activeSubject.id && !excludedTrials.has(`${activeSubject.id}-${t.trialId}`));
+    const subTrials = activeSubTrials.length > 0 ? activeSubTrials : processedData.filter(t => t.subjectId === activeSubject.id);
     if (subTrials.length === 0) return;
 
-    let totalX = 0;
-    let totalY = 0;
-    let count = 0;
+    const align = computeRigidDotAlignment(subTrials, activeSubject.nodes, activeSubject.calibration);
+    handleCalibrationChange({ offsetX: align.offsetX, offsetY: align.offsetY });
+    showToast(
+      `🎯 Подгонка к 9 т.: X=${align.offsetX > 0 ? '+' : ''}${align.offsetX}px, Y=${align.offsetY > 0 ? '+' : ''}${align.offsetY}px (RMSE ${align.rmseBefore} → ${align.rmseAfter} px)`,
+      'success'
+    );
+    addLog(`🎯 Авто-подгонка к 9 точкам (${activeSubject.id}): X=${align.offsetX > 0 ? '+' : ''}${align.offsetX}px, Y=${align.offsetY > 0 ? '+' : ''}${align.offsetY}px, RMSE ${align.rmseBefore}→${align.rmseAfter} px`);
+  }, [activeSubject, processedData, excludedTrials, handleCalibrationChange]);
 
-    const trialsToScan = selectedTrial ? [selectedTrial] : subTrials;
-    trialsToScan.forEach(t => {
-      const pts = t.basePoints || t.points;
-      pts.forEach(p => {
-        totalX += p.x;
-        totalY += p.y;
-        count++;
-      });
+  const handleBatchAlignTrajectories = useCallback(() => {
+    if (subjects.length === 0) {
+      showToast('Нет загруженных участников для выравнивания', 'error');
+      return;
+    }
+
+    const nextCalBySub = new Map<string, Calibration>();
+    let alignedSubsCount = 0;
+
+    subjects.forEach(sub => {
+      if (excludedSubjects.has(sub.id)) return;
+      const activeSubTrials = processedData.filter(t => t.subjectId === sub.id && !excludedTrials.has(`${sub.id}-${t.trialId}`));
+      const subTrials = activeSubTrials.length > 0 ? activeSubTrials : processedData.filter(t => t.subjectId === sub.id);
+      if (subTrials.length === 0) return;
+
+      const align = computeRigidDotAlignment(subTrials, sub.nodes, sub.calibration);
+      const dx = Math.abs(align.offsetX - (sub.calibration?.offsetX ?? 0));
+      const dy = Math.abs(align.offsetY - (sub.calibration?.offsetY ?? 0));
+      if (dx >= 1.0 || dy >= 1.0) {
+        alignedSubsCount++;
+        nextCalBySub.set(sub.id, {
+          ...sub.calibration,
+          offsetX: align.offsetX,
+          offsetY: align.offsetY
+        });
+      }
     });
 
-    if (count === 0) return;
-    const meanX = totalX / count;
-    const meanY = totalY / count;
-    const scale = activeSubject.calibration.scale || 1.0;
+    if (alignedSubsCount === 0) {
+      showToast('Все траектории уже выровнены относительно центров 9 точек', 'info');
+      return;
+    }
 
-    const autoOffsetX = Math.round((CANVAS_SIZE / 2 - meanX) * scale);
-    const autoOffsetY = Math.round((CANVAS_SIZE / 2 - meanY) * scale);
+    setSubjects(prev => prev.map(s => {
+      const nextCal = nextCalBySub.get(s.id);
+      return nextCal ? { ...s, calibration: nextCal } : s;
+    }));
 
-    handleCalibrationChange({ offsetX: autoOffsetX, offsetY: autoOffsetY });
-    addLog(`🎯 Авто-подгонка к 9 точкам: смещение X=${autoOffsetX > 0 ? '+' : ''}${autoOffsetX}px, Y=${autoOffsetY > 0 ? '+' : ''}${autoOffsetY}px`);
-  }, [activeSubject, processedData, selectedTrial, handleCalibrationChange]);
+    setProcessedData(prev => prev.map(t => {
+      const nextCal = nextCalBySub.get(t.subjectId);
+      if (!nextCal) return t;
+      const sub = subjects.find(s => s.id === t.subjectId);
+      if (!sub) return t;
+      return calibrateTrial(t, nextCal, sub.nodes, debouncedAngle, debouncedMinLen);
+    }));
+
+    showToast(`🎯 Выравнивание к 9 точкам выполнено для ${alignedSubsCount} участников`, 'success');
+    addLog(`🎯 Пакетное выравнивание к 9 точкам: обновлено ${alignedSubsCount} участников.`);
+  }, [subjects, processedData, excludedSubjects, excludedTrials, debouncedAngle, debouncedMinLen]);
 
   const trialsToDraw = useMemo(() => {
     return selectedTrialId !== null 
@@ -2130,9 +2179,17 @@ const App: React.FC = () => {
                 onClick={handleAutoCenter}
                 disabled={!activeSubject}
                 className="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500/30 disabled:opacity-40 text-amber-300 border border-amber-500/30 rounded-lg text-[11px] font-bold flex items-center gap-1.5 transition-all"
-                title="Автоматически центрировать координаты рисунка относительно 9 точек"
+                title="Жёстко подогнать траектории текущего испытуемого к центрам 9 точек (без искажения расстояний)"
               >
                 <Target size={13} /> <span className="hidden md:inline">Авто-подгонка к 9 точкам</span>
+              </button>
+              <button
+                onClick={handleBatchAlignTrajectories}
+                disabled={subjects.length === 0}
+                className="px-2 py-1 bg-sky-500/20 hover:bg-sky-500/30 disabled:opacity-40 text-sky-300 border border-sky-500/30 rounded-lg text-[11px] font-bold flex items-center gap-1 transition-all"
+                title="Жёстко выровнять траектории относительно центров 9 точек для всех загруженных участников"
+              >
+                <Zap size={12} /> <span className="hidden xl:inline">Всех (9 т.)</span>
               </button>
               <button
                 onClick={() => setIsCalibrating(!isCalibrating)}

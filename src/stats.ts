@@ -388,7 +388,7 @@ export const computeSummaryDataset = (
     'SubjectId', 'Group', 'IsOnline', 'LastName', 'FirstName', 'Age', 'Gender', 'SolvedBefore', 'Insight', 'IsSolved',
     'TotalSubjectTrials', 'TrialIndex', 'RelativeTrial', 'TrialId', 'TrialDurationMs', 'MovementTimeMs', 'PauseTimeMs',
     'PhaseNum', 'PhaseName', 'IsSolutionTrial', 'IsOutsideMatrix', 'TargetZoneId', 'TargetZoneName', 'IsManualZoneOverride',
-    'ApexOvershootPx', 'IdealOvershootPx', 'ApexErrorPx', 'SignedErrorPx', 'ToleranceMarginPx', 'InCorridor', 'ApexStatus',
+    'ApexOvershootPx', 'IdealOvershootPx', 'ApexErrorPx', 'SignedErrorPx', 'ApexFromDotCenterPx', 'IdealFromDotCenterPx', 'ToleranceMarginPx', 'InCorridor', 'ApexStatus',
     'TotalPathPx', 'PeakVelocityPxMs', 'AvgVelocityPxMs', 'LinesCount', 'TurnsCount'
   ];
 
@@ -396,7 +396,7 @@ export const computeSummaryDataset = (
     'ДЕМОГРАФИЯ И ГРУППА', 'ДЕМОГРАФИЯ И ГРУППА', 'ДЕМОГРАФИЯ И ГРУППА', 'ДЕМОГРАФИЯ И ГРУППА', 'ДЕМОГРАФИЯ И ГРУППА', 'ДЕМОГРАФИЯ И ГРУППА', 'ДЕМОГРАФИЯ И ГРУППА', 'ДЕМОГРАФИЯ И ГРУППА', 'ДЕМОГРАФИЯ И ГРУППА', 'РЕЗУЛЬТАТ',
     'ПОРЯДОК И ВРЕМЯ ПРОБЫ', 'ПОРЯДОК И ВРЕМЯ ПРОБЫ', 'ПОРЯДОК И ВРЕМЯ ПРОБЫ', 'ПОРЯДОК И ВРЕМЯ ПРОБЫ', 'ПОРЯДОК И ВРЕМЯ ПРОБЫ', 'КИНЕМАТИКА', 'КИНЕМАТИКА',
     'ФАЗА СЕССИИ', 'ФАЗА СЕССИИ', 'РЕЗУЛЬТАТ', 'ТОПОЛОГИЯ', 'ЗОНА ПОВОРОТА', 'ЗОНА ПОВОРОТА', 'ЭКСПЕРТНАЯ РАЗМЕТКА',
-    'НАЩУПЫВАНИЕ (PROBING)', 'НАЩУПЫВАНИЕ (PROBING)', 'НАЩУПЫВАНИЕ (PROBING)', 'НАЩУПЫВАНИЕ (PROBING)', 'НАЩУПЫВАНИЕ (PROBING)', 'НАЩУПЫВАНИЕ (PROBING)', 'НАЩУПЫВАНИЕ (PROBING)',
+    'НАЩУПЫВАНИЕ (PROBING)', 'НАЩУПЫВАНИЕ (PROBING)', 'НАЩУПЫВАНИЕ (PROBING)', 'НАЩУПЫВАНИЕ (PROBING)', 'НАЩУПЫВАНИЕ (PROBING)', 'НАЩУПЫВАНИЕ (PROBING)', 'НАЩУПЫВАНИЕ (PROBING)', 'НАЩУПЫВАНИЕ (PROBING)', 'НАЩУПЫВАНИЕ (PROBING)',
     'КИНЕМАТИКА', 'КИНЕМАТИКА', 'КИНЕМАТИКА', 'СТРУКТУРА ПРОБЫ', 'СТРУКТУРА ПРОБЫ'
   ];
 
@@ -706,6 +706,9 @@ export const computeSummaryDataset = (
       const peakVel = kMetrics?.peakVelocityPxMs !== undefined ? Number(kMetrics.peakVelocityPxMs.toFixed(3)) : '';
       const avgVel = kMetrics?.avgVelocityPxMs !== undefined ? Number(kMetrics.avgVelocityPxMs.toFixed(3)) : '';
 
+      const effectiveIdealFromBox = apexRes.effectiveIdealFromBox ?? Math.max(0, idealStep - globalBoxPadding);
+      const overshootFromCenter = apexRes.overshootFromCenterPx ?? (apexRes.overshootPx + globalBoxPadding);
+
       const longRow = [
         s.id,
         subjectGroups[s.id] || s.group || 'None',
@@ -732,9 +735,11 @@ export const computeSummaryDataset = (
         apexRes.activeZoneName || 'Нет вылета',
         manualOverrideZone ? 1 : 0,
         Number(apexRes.overshootPx.toFixed(1)),
-        Number(idealStep.toFixed(1)),
+        Number(effectiveIdealFromBox.toFixed(1)),
         Number(apexRes.absDeltaL.toFixed(1)),
-        Number((apexRes.overshootPx - idealStep).toFixed(1)),
+        Number(apexRes.deltaL.toFixed(1)),
+        Number(overshootFromCenter.toFixed(1)),
+        Number(idealStep.toFixed(1)),
         Number(toleranceMargin.toFixed(1)),
         apexRes.status === 'hit' ? 1 : 0,
         apexRes.status,

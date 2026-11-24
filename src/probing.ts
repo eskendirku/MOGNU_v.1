@@ -732,9 +732,10 @@ export function autoAlignSolverApex(
   let alignedTrialId = lastTrial.trialId;
 
   if (apexRes.hasExit && apexRes.overshootPx > 10) {
-    solutionOvershoot = Math.round(apexRes.overshootPx);
+    solutionOvershoot = Math.round(apexRes.overshootFromCenterPx ?? (apexRes.overshootPx + globalBoxPadding));
   } else {
     let maxExit = 0;
+    let bestCenterOvershoot = 116;
     let bestTrial = lastTrial;
     subTrials.forEach(t => {
       const res = extractTrialApexOvershoot(t, sub.nodes, {
@@ -744,11 +745,12 @@ export function autoAlignSolverApex(
       });
       if (res.hasExit && res.overshootPx > maxExit) {
         maxExit = res.overshootPx;
+        bestCenterOvershoot = res.overshootFromCenterPx ?? (res.overshootPx + globalBoxPadding);
         bestTrial = t;
       }
     });
     if (maxExit > 10) {
-      solutionOvershoot = Math.round(maxExit);
+      solutionOvershoot = Math.round(bestCenterOvershoot);
       alignedTrialId = bestTrial.trialId;
     }
   }
@@ -796,6 +798,7 @@ export function batchAutoAlignAllSolvers(
       idealOvershoot: alignResult.idealOvershoot,
       toleranceMargin: existingCfg?.toleranceMargin ?? 65.0,
       boxPadding: globalBoxPadding,
+      isCenterAnchored: true,
       isAutoAligned: true,
       alignedTrialId: alignResult.alignedTrialId,
       solveOverride: existingCfg?.solveOverride ?? false,
@@ -808,7 +811,7 @@ export function batchAutoAlignAllSolvers(
 
 /**
  * Batch reset apex target zones across all solvers (or all subjects)
- * back to standard baseline: idealOvershoot = 116.0 px, toleranceMargin = 65.0 px, isAutoAligned = false.
+ * back to standard baseline: idealOvershoot = 116.0 px (from dot center), toleranceMargin = 65.0 px, isAutoAligned = false.
  */
 export function batchResetAllSolvers(
   solvers: SubjectData[],
@@ -825,6 +828,7 @@ export function batchResetAllSolvers(
       idealOvershoot: 116.0,
       toleranceMargin: 65.0,
       boxPadding: globalBoxPadding,
+      isCenterAnchored: true,
       isAutoAligned: false,
       alignedTrialId: undefined,
       solveOverride: false,

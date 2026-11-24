@@ -34,7 +34,7 @@ export const AutoPreprocessingModal: React.FC<AutoPreprocessingModalProps> = ({
   totalTrials
 }) => {
   const [activeTab, setActiveTab] = useState<'rules' | 'results'>('rules');
-  const [logFilter, setLogFilter] = useState<'all' | 'SUBJECT' | 'TRIAL' | 'SOLVER'>('all');
+  const [logFilter, setLogFilter] = useState<'all' | 'CALIBRATION' | 'SUBJECT' | 'TRIAL' | 'SOLVER'>('all');
 
   if (!isOpen) return null;
 
@@ -402,6 +402,21 @@ export const AutoPreprocessingModal: React.FC<AutoPreprocessingModalProps> = ({
                       </p>
                     </div>
                   </label>
+
+                  <label className="flex items-start gap-2 bg-slate-900/60 p-2.5 rounded-lg border border-amber-500/30 cursor-pointer hover:border-amber-500/50 transition-colors">
+                    <input
+                      type="checkbox"
+                      checked={config.autoAlignTrajectoriesToDots}
+                      onChange={(e) => onChangeConfig({ autoAlignTrajectoriesToDots: e.target.checked })}
+                      className="mt-0.5 rounded border-slate-700 bg-slate-800 text-amber-500 focus:ring-0 cursor-pointer"
+                    />
+                    <div>
+                      <span className="font-bold text-amber-300">Авто-подгонка к 9 точкам</span>
+                      <p className="text-[10px] text-slate-400">
+                        Жёсткий сдвиг траекторий по центрам посещённых точек (для смещённых записей)
+                      </p>
+                    </div>
+                  </label>
                 </div>
               </div>
             </>
@@ -450,7 +465,7 @@ export const AutoPreprocessingModal: React.FC<AutoPreprocessingModalProps> = ({
                         {lastResult.stats.apexAlignedCount}
                       </div>
                       <div className="text-[9px] text-slate-400">
-                        Зоны поворота обновлены
+                        Зоны обновлены · 9т. выровнено: <span className="text-amber-300 font-bold">{lastResult.stats.trajectoriesAlignedCount}</span>
                       </div>
                     </div>
                   </div>
@@ -512,6 +527,12 @@ export const AutoPreprocessingModal: React.FC<AutoPreprocessingModalProps> = ({
                           Все
                         </button>
                         <button
+                          onClick={() => setLogFilter('CALIBRATION')}
+                          className={`px-2 py-0.5 rounded font-bold ${logFilter === 'CALIBRATION' ? 'bg-sky-600 text-white' : 'text-slate-400 hover:text-white'}`}
+                        >
+                          9 точек
+                        </button>
+                        <button
                           onClick={() => setLogFilter('SUBJECT')}
                           className={`px-2 py-0.5 rounded font-bold ${logFilter === 'SUBJECT' ? 'bg-rose-600 text-white' : 'text-slate-400 hover:text-white'}`}
                         >
@@ -539,14 +560,17 @@ export const AutoPreprocessingModal: React.FC<AutoPreprocessingModalProps> = ({
                           className={`p-1.5 rounded flex items-center justify-between border ${
                             entry.type === 'SOLVER'
                               ? 'bg-emerald-950/20 border-emerald-500/30 text-emerald-300'
-                              : (entry.type === 'SUBJECT'
-                                ? 'bg-rose-950/20 border-rose-500/30 text-rose-300'
-                                : 'bg-slate-900/60 border-slate-800 text-slate-300')
+                              : (entry.type === 'CALIBRATION'
+                                ? 'bg-sky-950/20 border-sky-500/30 text-sky-300'
+                                : (entry.type === 'SUBJECT'
+                                  ? 'bg-rose-950/20 border-rose-500/30 text-rose-300'
+                                  : 'bg-slate-900/60 border-slate-800 text-slate-300'))
                           }`}
                         >
                           <div className="flex items-center gap-2">
                             <span className="font-bold">
                               {entry.type === 'SOLVER' && '🏆'}
+                              {entry.type === 'CALIBRATION' && '🎯 Калибр.:'}
                               {entry.type === 'SUBJECT' && '🚫 Исп:'}
                               {entry.type === 'TRIAL' && '⚠️ Проба:'}
                             </span>

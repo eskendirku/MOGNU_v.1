@@ -47,12 +47,12 @@ export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = (
   calibration,
   selectedTrialId,
   onSelectTrial,
-  excludedTrials = new Set(),
+  excludedTrials = new Set<string>(),
   subjectId,
   allSubjects = [],
   allProcessedData = [],
   subjectGroups = {},
-  excludedSubjects = new Set(),
+  excludedSubjects = new Set<string>(),
   apexConfig,
   onUpdateApexConfig,
   onResetApexConfig,
@@ -90,6 +90,11 @@ export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = (
   const currentToleranceMargin = apexConfig?.toleranceMargin ?? 65.0;
   const solveOverride = !!apexConfig?.solveOverride;
   const capMaxError = !!apexConfig?.capMaxError;
+  const effectiveIdealFromBox = Math.max(0, currentIdealOvershoot - (globalBoxPadding ?? 15));
+  const minCorridorBox = Math.max(0, Math.round(effectiveIdealFromBox - currentToleranceMargin));
+  const maxCorridorBox = Math.round(effectiveIdealFromBox + currentToleranceMargin);
+  const minCorridorCenter = Math.max(0, Math.round(currentIdealOvershoot - currentToleranceMargin));
+  const maxCorridorCenter = Math.round(currentIdealOvershoot + currentToleranceMargin);
 
   // Single Subject Metrics calculation
   const { points, slope, rSquared, avgErrorFirstThird, avgErrorLastThird } = useMemo(() => {
@@ -197,11 +202,11 @@ export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = (
             <div className="text-[10px] text-slate-400">
               {errorMetric === 'center' ? (
                 <span>
-                  Ошибка вылета: <span className="font-mono text-slate-300">|L_вылет - {Math.round(currentIdealOvershoot)} px|</span> <span className="text-[9px] text-slate-500">(до центра)</span>
+                  Ошибка вылета: <span className="font-mono text-slate-300">|L_кв - {Math.round(effectiveIdealFromBox)} px|</span> <span className="text-[9px] text-slate-500">(от ц. т.3: {Math.round(currentIdealOvershoot)} px)</span>
                 </span>
               ) : (
                 <span>
-                  Ошибка до диапазона: <span className="font-mono text-emerald-400 font-bold">[{Math.round(currentIdealOvershoot - currentToleranceMargin)}–{Math.round(currentIdealOvershoot + currentToleranceMargin)} px]</span> <span className="text-[9px] text-slate-400">(внутри = 0 px)</span>
+                  Коридор от т.3: <span className="font-mono text-emerald-400 font-bold">[{minCorridorCenter}–{maxCorridorCenter} px]</span> <span className="text-[9px] text-slate-400">(от кв.: [{minCorridorBox}–{maxCorridorBox} px] = 0 px)</span>
                 </span>
               )}
             </div>
@@ -337,9 +342,9 @@ export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = (
                   ? 'bg-emerald-600 text-white shadow-sm'
                   : 'text-slate-400 hover:text-slate-200'
               }`}
-              title="Ошибка до центра диапазона: |L_вылет - L_центр|"
+              title={`Ошибка до центра диапазона: |L_ц3 - ${Math.round(currentIdealOvershoot)}| = |L_кв - ${Math.round(effectiveIdealFromBox)}|`}
             >
-              До центра ({Math.round(currentIdealOvershoot)} px)
+              До центра ({Math.round(currentIdealOvershoot)} px от т.3)
             </button>
             <button
               onClick={() => setErrorMetric('corridor')}
@@ -348,7 +353,7 @@ export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = (
                   ? 'bg-emerald-600 text-white shadow-sm'
                   : 'text-slate-400 hover:text-slate-200'
               }`}
-              title="Ошибка до границ диапазона [51–181 px]. Попадание внутрь = ошибка строго 0 px"
+              title={`Ошибка до границ диапазона [${minCorridorCenter}–${maxCorridorCenter} px от т.3 / ${minCorridorBox}–${maxCorridorBox} px от кв.]. Попадание внутрь = ошибка строго 0 px`}
             >
               До диапазона (коридор)
             </button>
@@ -388,7 +393,7 @@ export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = (
                 fontWeight="bold"
                 opacity="0.8"
               >
-                Целевое окно (вылет {Math.round(currentIdealOvershoot - currentToleranceMargin)}–{Math.round(currentIdealOvershoot + currentToleranceMargin)} px)
+                Целевое окно (от т.3: {minCorridorCenter}–{maxCorridorCenter} px | от кв.: {minCorridorBox}–{maxCorridorBox} px)
               </text>
             </>
           ) : (
@@ -418,7 +423,7 @@ export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = (
                 fontWeight="bold"
                 opacity="0.85"
               >
-                Целевой коридор [вылет {Math.round(currentIdealOvershoot - currentToleranceMargin)}–{Math.round(currentIdealOvershoot + currentToleranceMargin)} px = 0 px ошибки]
+                Целевой коридор [от т.3: {minCorridorCenter}–{maxCorridorCenter} px | от кв.: {minCorridorBox}–{maxCorridorBox} px = 0 px ошибки]
               </text>
             </>
           )}
@@ -427,10 +432,10 @@ export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = (
           <line x1={padLeft} y1={getY(0)} x2={padLeft + plotW} y2={getY(0)} stroke={errorMetric === 'corridor' ? '#10b981' : '#334155'} strokeWidth="1" />
           {errorMetric === 'center' ? (
             <>
-              <line x1={padLeft} y1={getY(currentIdealOvershoot)} x2={padLeft + plotW} y2={getY(currentIdealOvershoot)} stroke="#1e293b" strokeWidth="1" strokeDasharray="2 2" />
+              <line x1={padLeft} y1={getY(effectiveIdealFromBox)} x2={padLeft + plotW} y2={getY(effectiveIdealFromBox)} stroke="#1e293b" strokeWidth="1" strokeDasharray="2 2" />
               <text x={padLeft - 6} y={getY(0) + 3} fill="#64748b" fontSize="8" textAnchor="end">0</text>
               <text x={padLeft - 6} y={getY(currentToleranceMargin) + 3} fill="#10b981" fontSize="8" textAnchor="end">{Math.round(currentToleranceMargin)}</text>
-              <text x={padLeft - 6} y={getY(currentIdealOvershoot) + 3} fill="#64748b" fontSize="8" textAnchor="end">{Math.round(currentIdealOvershoot)}</text>
+              <text x={padLeft - 6} y={getY(effectiveIdealFromBox) + 3} fill="#64748b" fontSize="8" textAnchor="end">{Math.round(effectiveIdealFromBox)}</text>
               <text x={padLeft - 6} y={padTop + 6} fill="#64748b" fontSize="8" textAnchor="end">{Math.round(maxError)}</text>
             </>
           ) : (
@@ -745,8 +750,8 @@ export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = (
             )}
             {!hoveredPoint.label && (
               <div className="flex justify-between gap-3 text-slate-400">
-                <span>Реальный вылет:</span>
-                <span className="font-mono text-white font-bold">{hoveredPoint.overshootPx} px</span>
+                <span>Вылет (от кв. / от т.3):</span>
+                <span className="font-mono text-white font-bold">{hoveredPoint.overshootPx} / {Math.round(hoveredPoint.overshootPx + (globalBoxPadding ?? 15))} px</span>
               </div>
             )}
             <div className="flex justify-between gap-3 text-slate-400">
@@ -782,12 +787,12 @@ export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = (
             {errorMetric === 'center' ? (
               <div className="flex justify-between gap-3 text-slate-400">
                 <span>Отклонение от идеала:</span>
-                <span className="font-mono text-white font-bold">{Math.round(currentIdealOvershoot)} ± {hoveredAllPoint.avgError} px</span>
+                <span className="font-mono text-white font-bold">{Math.round(currentIdealOvershoot)} (кв. {Math.round(effectiveIdealFromBox)}) ± {hoveredAllPoint.avgError} px</span>
               </div>
             ) : (
               <div className="flex justify-between gap-3 text-slate-400">
                 <span>Целевой коридор:</span>
-                <span className="font-mono text-emerald-400 font-bold">[{Math.round(currentIdealOvershoot - currentToleranceMargin)}–{Math.round(currentIdealOvershoot + currentToleranceMargin)} px]</span>
+                <span className="font-mono text-emerald-400 font-bold">[{minCorridorCenter}–{maxCorridorCenter} / кв. {minCorridorBox}–{maxCorridorBox} px]</span>
               </div>
             )}
           </div>
@@ -898,11 +903,11 @@ export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = (
             </span>
             {apexConfig?.isAutoAligned ? (
               <span className="text-[9px] px-2 py-0.5 rounded-full bg-sky-500/20 text-sky-300 font-bold border border-sky-500/30">
-                🎯 Авто-апекс по финалу ({Math.round(currentIdealOvershoot)} px)
+                🎯 Авто-апекс по финалу ({Math.round(currentIdealOvershoot)} px от т.3 / кв. {Math.round(effectiveIdealFromBox)} px)
               </span>
             ) : (
               <span className="text-[9px] px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-300 font-medium border border-emerald-500/20">
-                {currentIdealOvershoot === 116 && currentToleranceMargin === 65 ? 'Стандартные (116 px, ±65 px)' : `Индивидуальные (${Math.round(currentIdealOvershoot)} px, ±${Math.round(currentToleranceMargin)} px)`}
+                {currentIdealOvershoot === 116 && currentToleranceMargin === 65 ? `Стандартные (от т.3: 116 px / кв. ${Math.round(effectiveIdealFromBox)} px, ±65 px)` : `Индивидуальные (от т.3: ${Math.round(currentIdealOvershoot)} px / кв. ${Math.round(effectiveIdealFromBox)} px, ±${Math.round(currentToleranceMargin)} px)`}
               </span>
             )}
           </div>
@@ -993,11 +998,13 @@ export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = (
             </div>
           </div>
 
-          {/* 2. Ideal Overshoot Distance */}
+          {/* 2. Ideal Overshoot Distance (Anchored to Outer Dot Center rawMaxX -> 4th virtual dot) */}
           <div className="flex flex-col gap-1 p-2 bg-slate-900/40 rounded-lg border border-slate-800">
             <div className="flex items-center justify-between text-slate-400">
-              <span>Центр зоны (вылет L):</span>
-              <span className="font-mono text-emerald-400 font-bold">{Math.round(currentIdealOvershoot)} px</span>
+              <span title="Расстояние от центра крайней точки (3-й в ряду) до виртуальной 4-й точки поворота">Цель зоны (от т.3 → 4*):</span>
+              <span className="font-mono text-emerald-400 font-bold">
+                {Math.round(currentIdealOvershoot)} px <span className="text-[9px] text-slate-400 font-normal">(кв.: {Math.round(effectiveIdealFromBox)} px)</span>
+              </span>
             </div>
             <input
               type="range"
@@ -1005,12 +1012,12 @@ export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = (
               max="280"
               step="2"
               value={Math.round(currentIdealOvershoot)}
-              onChange={(e) => onUpdateApexConfig && onUpdateApexConfig({ idealOvershoot: Number(e.target.value), isAutoAligned: false })}
+              onChange={(e) => onUpdateApexConfig && onUpdateApexConfig({ idealOvershoot: Number(e.target.value), isAutoAligned: false, isCenterAnchored: true })}
               className="w-full accent-emerald-500 cursor-pointer h-1.5 bg-slate-800 rounded-lg"
             />
             <div className="text-[8px] text-slate-500 flex justify-between">
               <span>40 px</span>
-              <span className="text-slate-400">Базовый: 116 px</span>
+              <span className="text-slate-400">Базовый: 116 px (= шаг 2→3)</span>
               <span>280 px</span>
             </div>
           </div>
@@ -1062,14 +1069,14 @@ export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = (
                 onChange={(e) => onUpdateApexConfig && onUpdateApexConfig({ capMaxError: e.target.checked })}
                 className="rounded border-slate-700 bg-slate-800 text-indigo-500 focus:ring-0 focus:ring-offset-0 cursor-pointer w-3.5 h-3.5"
               />
-              <span title="Тестовый режим 3: ошибка вылета наружу не может превышать ошибку полного невыхода из квадрата (116 px)">
-                🛡️ <strong className="text-slate-200">Error Cap</strong> (Ограничение ошибки {Math.round(currentIdealOvershoot)} px)
+              <span title={`Тестовый режим 3: ошибка вылета наружу не может превышать ошибку полного невыхода из квадрата (${Math.round(effectiveIdealFromBox)} px от квадрата)`}>
+                🛡️ <strong className="text-slate-200">Error Cap</strong> (Ограничение ошибки {Math.round(effectiveIdealFromBox)} px)
               </span>
             </label>
           </div>
 
           <span className="text-[9px] text-slate-500 font-mono">
-            Окно: [{Math.round(currentIdealOvershoot - currentToleranceMargin)} – {Math.round(currentIdealOvershoot + currentToleranceMargin)} px]
+            От т.3: [{minCorridorCenter}–{maxCorridorCenter} px] · от кв.: [{minCorridorBox}–{maxCorridorBox} px]
           </span>
         </div>
       </div>

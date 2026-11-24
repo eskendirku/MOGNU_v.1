@@ -113,9 +113,10 @@ export interface Calibration {
 export type TargetZoneId = 'TR_H' | 'TR_V' | 'BR_H' | 'BR_V' | 'BL_H' | 'BL_V' | 'TL_H' | 'TL_V';
 
 export interface ApexTargetConfig {
-  idealOvershoot: number;    // Baseline: 116.0 px
-  toleranceMargin: number;   // Baseline: 65.0 px (Вариант 1: коридор [51 .. 181 px])
-  boxPadding?: number;       // Baseline: 15.0 px (ручной отступ перцептивного пунктирного квадрата от крайних точек)
+  idealOvershoot: number;    // Distance from outer dot center (rawMaxX) to target apex (default: 116.0 px = 4th grid dot)
+  toleranceMargin: number;   // Baseline: 65.0 px (Вариант 1: коридор [51 .. 181 px] от центра точки)
+  boxPadding?: number;       // Baseline: 15.0 px (ручной отступ перцептивного пунктирного квадрата от центров крайних точек)
+  isCenterAnchored?: boolean;// True when idealOvershoot is anchored to dot center (rawMaxX + idealOvershoot)
   isAutoAligned?: boolean;
   alignedTrialId?: string | number;
   solveOverride?: boolean;   // Option 1: trial solved -> error = 0 (default: false)

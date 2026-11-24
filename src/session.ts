@@ -103,6 +103,22 @@ export function deserializeSession(
     return calibrateTrial(t, sub.calibration, sub.nodes, importedAngle, importedMinLen);
   });
 
+  const importedBoxPadding = data.globalBoxPadding ?? 15.0;
+  const rawApexConfigs: Record<string, ApexTargetConfig> = data.subjectApexConfigs || {};
+  const migratedApexConfigs: Record<string, ApexTargetConfig> = {};
+  Object.entries(rawApexConfigs).forEach(([sid, cfg]) => {
+    if (!cfg) return;
+    if (cfg.isAutoAligned && !cfg.isCenterAnchored) {
+      migratedApexConfigs[sid] = {
+        ...cfg,
+        idealOvershoot: Math.round((cfg.idealOvershoot ?? 116) + importedBoxPadding),
+        isCenterAnchored: true
+      };
+    } else {
+      migratedApexConfigs[sid] = { ...cfg, isCenterAnchored: true };
+    }
+  });
+
   const snapshot: SessionSnapshot = {
     subjects: importedSubjects,
     processedData: rehydratedTrials,
@@ -116,8 +132,8 @@ export function deserializeSession(
     angleThreshold: importedAngle,
     minLineLength: importedMinLen,
     usePhasedMode: data.usePhasedMode,
-    subjectApexConfigs: data.subjectApexConfigs || {},
-    globalBoxPadding: data.globalBoxPadding ?? 15.0,
+    subjectApexConfigs: migratedApexConfigs,
+    globalBoxPadding: importedBoxPadding,
     manualZoneOverrides: data.manualZoneOverrides || {}
   };
 

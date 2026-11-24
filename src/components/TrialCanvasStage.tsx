@@ -396,9 +396,10 @@ export const TrialCanvasStage: React.FC<TrialCanvasStageProps> = ({
             ctx.textAlign = 'center';
             ctx.fillText(`🎯 ВРУЧНУЮ: ${z.name.toUpperCase()} (кликните для сброса)`, z.x, z.y - ((tolRadius + 5) / viewScale));
             if (apexRes) {
+              const fromCenter = apexRes.overshootFromCenterPx ?? (apexRes.overshootPx + boxPad);
               ctx.fillStyle = '#a16207';
               ctx.font = `bold ${8 / viewScale}px monospace`;
-              ctx.fillText(`L_вылет: ${apexRes.overshootPx} px (ΔL: ${apexRes.deltaL > 0 ? '+' : ''}${apexRes.deltaL} px)`, z.x, z.y + ((tolRadius + 13) / viewScale));
+              ctx.fillText(`L_кв: ${apexRes.overshootPx} px | от т.3: ${fromCenter} px (ΔL: ${apexRes.deltaL > 0 ? '+' : ''}${apexRes.deltaL} px)`, z.x, z.y + ((tolRadius + 13) / viewScale));
             }
           } else {
             ctx.fillStyle = 'rgba(16, 185, 129, 0.22)';
@@ -408,14 +409,16 @@ export const TrialCanvasStage: React.FC<TrialCanvasStageProps> = ({
             ctx.setLineDash([]);
             ctx.stroke();
 
+            const effectiveFromBox = Math.max(0, Math.round(step - boxPad));
             ctx.fillStyle = '#059669';
             ctx.font = `bold ${9 / viewScale}px sans-serif`;
             ctx.textAlign = 'center';
-            ctx.fillText(`🎯 ЦЕЛЕВАЯ ЗОНА: ${z.name.toUpperCase()} (${Math.round(step)}px, ±${Math.round(tolRadius)}px)`, z.x, z.y - ((tolRadius + 5) / viewScale));
+            ctx.fillText(`🎯 ЗОНА: ${z.name.toUpperCase()} (от т.3: ${Math.round(step)}px / от кв.: ${effectiveFromBox}px, ±${Math.round(tolRadius)}px)`, z.x, z.y - ((tolRadius + 5) / viewScale));
             if (apexRes) {
+              const fromCenter = apexRes.overshootFromCenterPx ?? (apexRes.overshootPx + boxPad);
               ctx.fillStyle = '#047857';
               ctx.font = `bold ${8 / viewScale}px monospace`;
-              ctx.fillText(`L_вылет: ${apexRes.overshootPx} px (ΔL: ${apexRes.deltaL > 0 ? '+' : ''}${apexRes.deltaL} px)`, z.x, z.y + ((tolRadius + 13) / viewScale));
+              ctx.fillText(`L_кв: ${apexRes.overshootPx} px | от т.3: ${fromCenter} px (ΔL: ${apexRes.deltaL > 0 ? '+' : ''}${apexRes.deltaL} px)`, z.x, z.y + ((tolRadius + 13) / viewScale));
             }
           }
 
