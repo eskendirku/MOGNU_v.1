@@ -558,3 +558,32 @@ export function batchAutoAlignAllSolvers(
 
   return newConfigs;
 }
+
+/**
+ * Batch reset apex target zones across all solvers (or all subjects)
+ * back to standard baseline: idealOvershoot = 116.0 px, toleranceMargin = 65.0 px, isAutoAligned = false.
+ */
+export function batchResetAllSolvers(
+  solvers: SubjectData[],
+  options: {
+    existingConfigs?: Record<string, ApexTargetConfig>;
+    globalBoxPadding?: number;
+  } = {}
+): Record<string, ApexTargetConfig> {
+  const { existingConfigs = {}, globalBoxPadding = 15.0 } = options;
+  const newConfigs: Record<string, ApexTargetConfig> = { ...existingConfigs };
+
+  solvers.forEach(sub => {
+    newConfigs[sub.id] = {
+      idealOvershoot: 116.0,
+      toleranceMargin: 65.0,
+      boxPadding: globalBoxPadding,
+      isAutoAligned: false,
+      alignedTrialId: undefined,
+      solveOverride: false,
+      capMaxError: false
+    };
+  });
+
+  return newConfigs;
+}

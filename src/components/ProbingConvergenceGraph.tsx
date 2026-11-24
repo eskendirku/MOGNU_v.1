@@ -14,6 +14,31 @@ import {
 
 export type { ProbingPoint } from '../probing';
 
+export interface ProbingConvergenceGraphProps {
+  trials: ProcessedTrial[];
+  nodes: GridNode[];
+  calibration: Calibration;
+  selectedTrialId: string | number | null;
+  onSelectTrial: (tId: string | number) => void;
+  excludedTrials?: Set<string>;
+  subjectId: string;
+  allSubjects?: SubjectData[];
+  allProcessedData?: ProcessedTrial[];
+  subjectGroups?: Record<string, string>;
+  excludedSubjects?: Set<string>;
+  apexConfig?: ApexTargetConfig;
+  onUpdateApexConfig?: (updates: Partial<ApexTargetConfig>) => void;
+  onResetApexConfig?: () => void;
+  onAutoAlignApex?: () => void;
+  onBatchAutoAlignAllSolvers?: () => void;
+  onBatchResetAllSolvers?: () => void;
+  isCurrentSubjectSolved?: boolean;
+  subjectApexConfigs?: Record<string, ApexTargetConfig>;
+  globalBoxPadding?: number;
+  onUpdateGlobalBoxPadding?: (pad: number) => void;
+  manualZoneOverrides?: Record<string, TargetZoneId>;
+}
+
 export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = ({
   trials,
   nodes,
@@ -31,6 +56,7 @@ export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = (
   onResetApexConfig,
   onAutoAlignApex,
   onBatchAutoAlignAllSolvers,
+  onBatchResetAllSolvers,
   isCurrentSubjectSolved = false,
   subjectApexConfigs = {},
   globalBoxPadding = 15.0,
@@ -644,61 +670,78 @@ export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = (
 
       {/* APEX TARGET CONFIGURATION & TEST MODES CONTROLLER */}
       <div className="mt-3 pt-2.5 border-t border-slate-800/80">
-        <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
           <div className="flex items-center gap-2">
             <span className="text-[11px] font-bold text-slate-300 flex items-center gap-1.5">
               <Target size={13} className="text-emerald-400" />
-              Параметры зоны поворота испытуемого:
+              Параметры зоны поворота:
             </span>
             {apexConfig?.isAutoAligned ? (
-              <span className="text-[9px] px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-300 font-bold border border-sky-500/30">
-                🎯 Авто-апекс по решению ({Math.round(currentIdealOvershoot)} px)
+              <span className="text-[9px] px-2 py-0.5 rounded-full bg-sky-500/20 text-sky-300 font-bold border border-sky-500/30">
+                🎯 Авто-апекс по финалу ({Math.round(currentIdealOvershoot)} px)
               </span>
             ) : (
-              <span className="text-[9px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 font-medium">
-                {currentIdealOvershoot === 116 && currentToleranceMargin === 65 ? 'Базовые (116 px, ±65 px)' : `Индивидуальные (${Math.round(currentIdealOvershoot)} px, ±${Math.round(currentToleranceMargin)} px)`}
+              <span className="text-[9px] px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-300 font-medium border border-emerald-500/20">
+                {currentIdealOvershoot === 116 && currentToleranceMargin === 65 ? 'Стандартные (116 px, ±65 px)' : `Индивидуальные (${Math.round(currentIdealOvershoot)} px, ±${Math.round(currentToleranceMargin)} px)`}
               </span>
             )}
           </div>
 
           {/* Quick Action Buttons */}
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1.5 flex-wrap">
             {/* Batch Auto-Align All Solvers */}
             {onBatchAutoAlignAllSolvers && (
               <button
                 onClick={() => onBatchAutoAlignAllSolvers()}
-                className="px-2 py-1 rounded text-[10px] font-bold flex items-center gap-1 bg-amber-600 hover:bg-amber-500 text-white shadow-sm transition-all cursor-pointer"
-                title="Автоматически выровнять целевые зоны по финалу ДЛЯ ВСЕХ решивших участников выборки (в 1 клик)"
+                className="px-2.5 py-1 rounded-lg text-[10px] font-bold flex items-center gap-1.5 bg-amber-600 hover:bg-amber-500 text-white shadow-sm shadow-amber-900/30 transition-all cursor-pointer"
+                title="Выставить автокоррекцию по финалу решения для всех успешных испытуемых (в 1 клик)"
               >
-                <Sparkles size={11} /> ⚡ Авто для всех решивших
+                <Sparkles size={11} className="text-amber-200" />
+                <span>⚡ Автокоррекция для всех</span>
               </button>
             )}
 
-            {/* Auto-Align Button */}
+            {/* Batch Reset All Solvers */}
+            {onBatchResetAllSolvers && (
+              <button
+                onClick={() => onBatchResetAllSolvers()}
+                className="px-2.5 py-1 rounded-lg text-[10px] font-bold flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/30 shadow-sm transition-all cursor-pointer"
+                title="Вернуться к стандартным значениям (116 px, ±65 px) для всех решивших (в 1 клик)"
+              >
+                <RotateCcw size={11} className="text-amber-400" />
+                <span>Сбросить диапазон для всех</span>
+              </button>
+            )}
+
+            <div className="h-4 w-px bg-slate-800 mx-0.5 hidden sm:block"></div>
+
+            {/* Individual Auto-Align Button */}
             <button
               onClick={() => onAutoAlignApex && onAutoAlignApex()}
               disabled={!isCurrentSubjectSolved}
-              className={`px-2 py-1 rounded text-[10px] font-bold flex items-center gap-1 transition-all ${
+              className={`px-2 py-1 rounded-lg text-[10px] font-bold flex items-center gap-1 transition-all ${
                 isCurrentSubjectSolved
                   ? 'bg-sky-600 hover:bg-sky-500 text-white shadow-sm cursor-pointer'
-                  : 'bg-slate-800/60 text-slate-600 cursor-not-allowed border border-slate-800'
+                  : 'bg-slate-800/40 text-slate-600 cursor-not-allowed border border-slate-800'
               }`}
               title={
                 isCurrentSubjectSolved
-                  ? "Автоматически выровнять центральную точку целевой зоны по координатам финального поворота на успешной попытке решения"
-                  : "Автокоррекция доступна только для успешных решателей. Сначала отметьте испытуемого как решившего задачу (трофей 🏆 в списке участников)"
+                  ? "Автоматически выровнять центральную точку целевой зоны по координатам финального поворота на успешной попытке текущего испытуемого"
+                  : "Автокоррекция доступна только для успешных решателей. Сначала отметьте испытуемого как решившего задачу (трофей 🏆)"
               }
             >
-              <Sparkles size={11} /> Автокоррекция по финалу
+              <Sparkles size={11} />
+              <span>Авто по финалу</span>
             </button>
 
-            {/* Reset Button */}
+            {/* Individual Reset Button */}
             <button
               onClick={() => onResetApexConfig && onResetApexConfig()}
-              className="px-2 py-1 rounded text-[10px] font-bold flex items-center gap-1 bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors cursor-pointer"
-              title="Сбросить параметры целевой зоны к базовым (вылет 116 px, допуск 65 px)"
+              className="px-2 py-1 rounded-lg text-[10px] font-bold flex items-center gap-1 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200 border border-slate-700/60 transition-colors cursor-pointer"
+              title="Сбросить параметры целевой зоны текущего испытуемого к стандарту (116 px, ±65 px)"
             >
-              <RotateCcw size={11} /> Сброс
+              <RotateCcw size={11} />
+              <span>Сброс</span>
             </button>
           </div>
         </div>

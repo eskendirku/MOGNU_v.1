@@ -28,7 +28,7 @@ import {
 import { KinematicsVelocityGraph } from './src/components/KinematicsVelocityGraph';
 import { ProbingConvergenceGraph } from './src/components/ProbingConvergenceGraph';
 import { TrialCanvasStage } from './src/components/TrialCanvasStage';
-import { autoAlignSolverApex, batchAutoAlignAllSolvers } from './src/probing';
+import { autoAlignSolverApex, batchAutoAlignAllSolvers, batchResetAllSolvers } from './src/probing';
 import { serializeSession, deserializeSession } from './src/session';
 import { downloadText } from './src/utils/download';
 
@@ -541,6 +541,25 @@ const App: React.FC = () => {
     showToast(`⚡ Автокоррекция целевых зон выполнена для всех ${alignedCount} решивших!`, 'success');
     addLog(`Автокоррекция целевых зон выполнена для ${alignedCount} решивших участников.`);
   }, [subjects, processedData, excludedTrials, globalBoxPadding, subjectApexConfigs]);
+
+  const handleBatchResetAllSolvers = useCallback(() => {
+    const solvedSubs = subjects.filter(s => s.isSolved);
+    const targetSubs = solvedSubs.length > 0 ? solvedSubs : subjects;
+    if (targetSubs.length === 0) {
+      setSubjectApexConfigs({});
+      showToast('Параметры зон сброшены к стандартным (116 px, ±65 px)', 'info');
+      return;
+    }
+
+    const newConfigs = batchResetAllSolvers(targetSubs, {
+      existingConfigs: subjectApexConfigs,
+      globalBoxPadding
+    });
+
+    setSubjectApexConfigs(newConfigs);
+    showToast(`🔄 Параметры целевой зоны сброшены к стандарту (116 px, ±65 px) для всех ${targetSubs.length} участников!`, 'info');
+    addLog(`Параметры целевых зон сброшены к стандарту (116 px, ±65 px) для ${targetSubs.length} участников.`);
+  }, [subjects, subjectApexConfigs, globalBoxPadding]);
   const [activeTab, setActiveTab] = useState<'analysis' | 'geometry' | 'heatmaps' | 'reports'>('analysis');
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'error' | 'info' } | null>(null);
 
@@ -2437,6 +2456,7 @@ const App: React.FC = () => {
                       onResetApexConfig={() => activeSubjectId && handleResetApexConfig(activeSubjectId)}
                       onAutoAlignApex={() => activeSubjectId && handleAutoAlignApex(activeSubjectId)}
                       onBatchAutoAlignAllSolvers={handleBatchAutoAlignAllSolvers}
+                      onBatchResetAllSolvers={handleBatchResetAllSolvers}
                       isCurrentSubjectSolved={!!activeSubject.isSolved}
                       subjectApexConfigs={subjectApexConfigs}
                       globalBoxPadding={globalBoxPadding}
