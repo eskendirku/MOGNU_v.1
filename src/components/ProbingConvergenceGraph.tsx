@@ -2,17 +2,19 @@ import React, { useMemo, useState } from 'react';
 import { ProcessedTrial, GridNode, Calibration, SubjectData, ApexTargetConfig, TargetZoneId } from '../types';
 import { 
   TrendingDown, TrendingUp, Target, Users, User, Award, Info, 
-  CheckCircle2, AlertCircle, Sparkles, RotateCcw, SlidersHorizontal, ShieldCheck, Check
+  CheckCircle2, AlertCircle, Sparkles, RotateCcw, SlidersHorizontal, ShieldCheck, Check, Layers, Compass
 } from 'lucide-react';
 import { extractTrialApexOvershoot } from '../geometry';
 import {
   ProbingPoint,
   calculateSubjectProbingMetrics,
   calculateAllSolversSeries,
-  calculateGroupSeries
+  calculateGroupSeries,
+  ApexErrorTargetMode,
+  ProbingAggregationMode
 } from '../probing';
 
-export type { ProbingPoint } from '../probing';
+export type { ProbingPoint, ApexErrorTargetMode, ProbingAggregationMode } from '../probing';
 
 export interface ProbingConvergenceGraphProps {
   trials: ProcessedTrial[];
@@ -64,16 +66,20 @@ export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = (
   manualZoneOverrides = {}
 }) => {
   const [viewMode, setViewMode] = useState<'single' | 'all_solvers' | 'groups'>('single');
+  const [aggregationMode, setAggregationMode] = useState<ProbingAggregationMode>('trials');
+  const [errorMetric, setErrorMetric] = useState<ApexErrorTargetMode>('center');
   const [showConfigPanel, setShowConfigPanel] = useState<boolean>(true);
   const [hoveredPoint, setHoveredPoint] = useState<ProbingPoint | null>(null);
   const [hoveredAllPoint, setHoveredAllPoint] = useState<{
     trialNum: number;
+    label?: string;
     avgError: number;
     count: number;
   } | null>(null);
   const [hoveredGroupPoint, setHoveredGroupPoint] = useState<{
     group: string;
     trialNum: number;
+    label?: string;
     error: number;
     count: number;
     color: string;
@@ -93,9 +99,11 @@ export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = (
       isCurrentSubjectSolved,
       excludedTrials,
       manualZoneOverrides,
-      globalBoxPadding
+      globalBoxPadding,
+      errorMetric,
+      aggregationMode
     });
-  }, [trials, nodes, subjectId, apexConfig, isCurrentSubjectSolved, excludedTrials, manualZoneOverrides, globalBoxPadding]);
+  }, [trials, nodes, subjectId, apexConfig, isCurrentSubjectSolved, excludedTrials, manualZoneOverrides, globalBoxPadding, errorMetric, aggregationMode]);
 
   // Population metrics for ALL successful solvers across ALL groups combined
   const allSolversSeries = useMemo(() => {
@@ -104,9 +112,11 @@ export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = (
       excludedTrials,
       subjectApexConfigs,
       manualZoneOverrides,
-      globalBoxPadding
+      globalBoxPadding,
+      errorMetric,
+      aggregationMode
     });
-  }, [allSubjects, allProcessedData, excludedSubjects, excludedTrials, subjectApexConfigs, manualZoneOverrides, globalBoxPadding]);
+  }, [allSubjects, allProcessedData, excludedSubjects, excludedTrials, subjectApexConfigs, manualZoneOverrides, globalBoxPadding, errorMetric, aggregationMode]);
 
   // Group Comparison calculation (for solvers grouped by experimental condition)
   const groupSeries = useMemo(() => {
@@ -115,17 +125,19 @@ export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = (
       excludedTrials,
       subjectApexConfigs,
       manualZoneOverrides,
-      globalBoxPadding
+      globalBoxPadding,
+      errorMetric,
+      aggregationMode
     });
-  }, [allSubjects, allProcessedData, subjectGroups, excludedSubjects, excludedTrials, subjectApexConfigs, manualZoneOverrides, globalBoxPadding]);
+  }, [allSubjects, allProcessedData, subjectGroups, excludedSubjects, excludedTrials, subjectApexConfigs, manualZoneOverrides, globalBoxPadding, errorMetric, aggregationMode]);
 
   // Dimensions for SVG rendering
   const width = 420;
-  const height = 150;
+  const height = 155;
   const padLeft = 40;
   const padRight = 20;
   const padTop = 15;
-  const padBottom = 25;
+  const padBottom = 26;
   const plotW = width - padLeft - padRight;
   const plotH = height - padTop - padBottom;
 
@@ -137,7 +149,8 @@ export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = (
   const maxGroupError = Math.max(160, ...groupSeries.flatMap(g => g.points.map(p => p.avgError)));
 
   const maxError = viewMode === 'single' ? maxErrorSingle : (viewMode === 'all_solvers' ? maxAllError : maxGroupError);
-  const maxTrials = viewMode === 'single' ? Math.max(1, points.length) : (viewMode === 'all_solvers' ? maxAllTrials : maxGroupTrials);
+  const numPhases = aggregationMode === 'phases_3' ? 3 : (aggregationMode === 'phases_5' ? 5 : null);
+  const maxTrials = numPhases ?? (viewMode === 'single' ? Math.max(1, points.length) : (viewMode === 'all_solvers' ? maxAllTrials : maxGroupTrials));
 
   const getX = (trialNum: number) => {
     if (maxTrials <= 1) return padLeft + plotW / 2;
@@ -182,7 +195,15 @@ export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = (
               )}
             </h4>
             <div className="text-[10px] text-slate-400">
-              Ошибка вылета: <span className="font-mono text-slate-300">|L_вылет - {Math.round(currentIdealOvershoot)} px|</span>
+              {errorMetric === 'center' ? (
+                <span>
+                  Ошибка вылета: <span className="font-mono text-slate-300">|L_вылет - {Math.round(currentIdealOvershoot)} px|</span> <span className="text-[9px] text-slate-500">(до центра)</span>
+                </span>
+              ) : (
+                <span>
+                  Ошибка до диапазона: <span className="font-mono text-emerald-400 font-bold">[{Math.round(currentIdealOvershoot - currentToleranceMargin)}–{Math.round(currentIdealOvershoot + currentToleranceMargin)} px]</span> <span className="text-[9px] text-slate-400">(внутри = 0 px)</span>
+                </span>
+              )}
             </div>
           </div>
         </div>
@@ -232,7 +253,7 @@ export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = (
               <div className="flex items-center gap-1 text-[11px] font-mono font-bold">
                 <span className="text-slate-400">Тренд:</span>
                 <span className={slope < 0 ? 'text-emerald-400' : 'text-slate-300'}>
-                  {slope > 0 ? `+${slope.toFixed(2)}` : slope.toFixed(2)} px/пр
+                  {slope > 0 ? `+${slope.toFixed(2)}` : slope.toFixed(2)} {aggregationMode === 'trials' ? 'px/пр' : 'px/эт'}
                 </span>
               </div>
               <span className="text-[9px] text-slate-500 font-mono">
@@ -246,7 +267,7 @@ export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = (
               <div className="flex items-center gap-1 text-[11px] font-mono font-bold">
                 <span className="text-slate-400">Популяция:</span>
                 <span className={allSolversSeries.slope < 0 ? 'text-sky-400' : 'text-slate-300'}>
-                  {allSolversSeries.slope > 0 ? `+${allSolversSeries.slope}` : allSolversSeries.slope} px/пр
+                  {allSolversSeries.slope > 0 ? `+${allSolversSeries.slope}` : allSolversSeries.slope} {aggregationMode === 'trials' ? 'px/пр' : 'px/эт'}
                 </span>
               </div>
               <span className="text-[9px] text-slate-500 font-mono">
@@ -257,47 +278,231 @@ export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = (
         </div>
       </div>
 
+      {/* Control Bar: Time Aggregation & Error Calculation Metric */}
+      <div className="flex items-center justify-between flex-wrap gap-2 mb-2 px-1">
+        {/* Left: Time Aggregation (Ось X) */}
+        <div className="flex items-center gap-1.5">
+          <span className="text-[10px] text-slate-400 font-medium flex items-center gap-1">
+            <Layers size={11} className="text-indigo-400" />
+            <span>Шкала X:</span>
+          </span>
+          <div className="flex items-center bg-slate-950 p-0.5 rounded-lg border border-slate-800">
+            <button
+              onClick={() => setAggregationMode('trials')}
+              className={`px-2 py-0.5 rounded text-[10px] font-bold transition-all cursor-pointer ${
+                aggregationMode === 'trials'
+                  ? 'bg-indigo-600 text-white shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+              title="Попытка за попыткой (1, 2, ... N)"
+            >
+              По попыткам
+            </button>
+            <button
+              onClick={() => setAggregationMode('phases_3')}
+              className={`px-2 py-0.5 rounded text-[10px] font-bold transition-all cursor-pointer ${
+                aggregationMode === 'phases_3'
+                  ? 'bg-indigo-600 text-white shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+              title="Попытки каждого испытуемого делятся ровно на 3 равных этапа (Ранний, Средний, Финал)"
+            >
+              По 3 этапам
+            </button>
+            <button
+              onClick={() => setAggregationMode('phases_5')}
+              className={`px-2 py-0.5 rounded text-[10px] font-bold transition-all cursor-pointer ${
+                aggregationMode === 'phases_5'
+                  ? 'bg-indigo-600 text-white shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+              title="Попытки каждого испытуемого делятся на 5 равных этапов (по 20% процесса решения)"
+            >
+              По 5 этапам
+            </button>
+          </div>
+        </div>
+
+        {/* Right: Error Metric (Ось Y) */}
+        <div className="flex items-center gap-1.5">
+          <span className="text-[10px] text-slate-400 font-medium flex items-center gap-1">
+            <Compass size={11} className="text-emerald-400" />
+            <span>Расчет ошибки:</span>
+          </span>
+          <div className="flex items-center bg-slate-950 p-0.5 rounded-lg border border-slate-800">
+            <button
+              onClick={() => setErrorMetric('center')}
+              className={`px-2 py-0.5 rounded text-[10px] font-bold transition-all cursor-pointer ${
+                errorMetric === 'center'
+                  ? 'bg-emerald-600 text-white shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+              title="Ошибка до центра диапазона: |L_вылет - L_центр|"
+            >
+              До центра ({Math.round(currentIdealOvershoot)} px)
+            </button>
+            <button
+              onClick={() => setErrorMetric('corridor')}
+              className={`px-2 py-0.5 rounded text-[10px] font-bold transition-all cursor-pointer ${
+                errorMetric === 'corridor'
+                  ? 'bg-emerald-600 text-white shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+              title="Ошибка до границ диапазона [51–181 px]. Попадание внутрь = ошибка строго 0 px"
+            >
+              До диапазона (коридор)
+            </button>
+          </div>
+        </div>
+      </div>
+
       {/* Interactive SVG Canvas */}
       <div className="w-full relative bg-slate-950 rounded-xl border border-slate-800/80 p-1">
         <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-auto overflow-visible">
-          {/* Target Green Tolerance Window: 0 to currentToleranceMargin px error */}
-          <rect
-            x={padLeft}
-            y={getY(currentToleranceMargin)}
-            width={plotW}
-            height={getY(0) - getY(currentToleranceMargin)}
-            fill="rgba(16, 185, 129, 0.12)"
-          />
-          <line
-            x1={padLeft}
-            y1={getY(currentToleranceMargin)}
-            x2={padLeft + plotW}
-            y2={getY(currentToleranceMargin)}
-            stroke="#10b981"
-            strokeWidth="1"
-            strokeDasharray="3 3"
-            opacity="0.6"
-          />
-          <text
-            x={padLeft + 5}
-            y={getY(currentToleranceMargin) + 10}
-            fill="#10b981"
-            fontSize="8"
-            fontWeight="bold"
-            opacity="0.8"
-          >
-            Целевое окно (вылет {Math.round(currentIdealOvershoot - currentToleranceMargin)}–{Math.round(currentIdealOvershoot + currentToleranceMargin)} px)
-          </text>
+          {/* Target Green Tolerance Window or Corridor */}
+          {errorMetric === 'center' ? (
+            <>
+              {/* Target Green Tolerance Window: 0 to currentToleranceMargin px error */}
+              <rect
+                x={padLeft}
+                y={getY(currentToleranceMargin)}
+                width={plotW}
+                height={getY(0) - getY(currentToleranceMargin)}
+                fill="rgba(16, 185, 129, 0.12)"
+              />
+              <line
+                x1={padLeft}
+                y1={getY(currentToleranceMargin)}
+                x2={padLeft + plotW}
+                y2={getY(currentToleranceMargin)}
+                stroke="#10b981"
+                strokeWidth="1"
+                strokeDasharray="3 3"
+                opacity="0.6"
+              />
+              <text
+                x={padLeft + 5}
+                y={getY(currentToleranceMargin) + 10}
+                fill="#10b981"
+                fontSize="8"
+                fontWeight="bold"
+                opacity="0.8"
+              >
+                Целевое окно (вылет {Math.round(currentIdealOvershoot - currentToleranceMargin)}–{Math.round(currentIdealOvershoot + currentToleranceMargin)} px)
+              </text>
+            </>
+          ) : (
+            <>
+              {/* Target Corridor Dead-Zone: Error = 0 inside corridor */}
+              <rect
+                x={padLeft}
+                y={getY(8)}
+                width={plotW}
+                height={getY(0) - getY(8)}
+                fill="rgba(16, 185, 129, 0.15)"
+              />
+              <line
+                x1={padLeft}
+                y1={getY(0)}
+                x2={padLeft + plotW}
+                y2={getY(0)}
+                stroke="#10b981"
+                strokeWidth="2"
+                opacity="0.9"
+              />
+              <text
+                x={padLeft + 5}
+                y={getY(0) - 5}
+                fill="#10b981"
+                fontSize="8"
+                fontWeight="bold"
+                opacity="0.85"
+              >
+                Целевой коридор [вылет {Math.round(currentIdealOvershoot - currentToleranceMargin)}–{Math.round(currentIdealOvershoot + currentToleranceMargin)} px = 0 px ошибки]
+              </text>
+            </>
+          )}
 
           {/* Grid lines and Y-axis marks */}
-          <line x1={padLeft} y1={getY(0)} x2={padLeft + plotW} y2={getY(0)} stroke="#334155" strokeWidth="1" />
-          <line x1={padLeft} y1={getY(currentIdealOvershoot)} x2={padLeft + plotW} y2={getY(currentIdealOvershoot)} stroke="#1e293b" strokeWidth="1" strokeDasharray="2 2" />
+          <line x1={padLeft} y1={getY(0)} x2={padLeft + plotW} y2={getY(0)} stroke={errorMetric === 'corridor' ? '#10b981' : '#334155'} strokeWidth="1" />
+          {errorMetric === 'center' ? (
+            <>
+              <line x1={padLeft} y1={getY(currentIdealOvershoot)} x2={padLeft + plotW} y2={getY(currentIdealOvershoot)} stroke="#1e293b" strokeWidth="1" strokeDasharray="2 2" />
+              <text x={padLeft - 6} y={getY(0) + 3} fill="#64748b" fontSize="8" textAnchor="end">0</text>
+              <text x={padLeft - 6} y={getY(currentToleranceMargin) + 3} fill="#10b981" fontSize="8" textAnchor="end">{Math.round(currentToleranceMargin)}</text>
+              <text x={padLeft - 6} y={getY(currentIdealOvershoot) + 3} fill="#64748b" fontSize="8" textAnchor="end">{Math.round(currentIdealOvershoot)}</text>
+              <text x={padLeft - 6} y={padTop + 6} fill="#64748b" fontSize="8" textAnchor="end">{Math.round(maxError)}</text>
+            </>
+          ) : (
+            <>
+              <line x1={padLeft} y1={getY(50)} x2={padLeft + plotW} y2={getY(50)} stroke="#1e293b" strokeWidth="1" strokeDasharray="2 2" />
+              <line x1={padLeft} y1={getY(100)} x2={padLeft + plotW} y2={getY(100)} stroke="#1e293b" strokeWidth="1" strokeDasharray="2 2" />
+              <text x={padLeft - 6} y={getY(0) + 3} fill="#10b981" fontSize="8" textAnchor="end" fontWeight="bold">0</text>
+              <text x={padLeft - 6} y={getY(50) + 3} fill="#64748b" fontSize="8" textAnchor="end">50</text>
+              <text x={padLeft - 6} y={getY(100) + 3} fill="#64748b" fontSize="8" textAnchor="end">100</text>
+              <text x={padLeft - 6} y={padTop + 6} fill="#64748b" fontSize="8" textAnchor="end">{Math.round(maxError)}</text>
+            </>
+          )}
+
+          {/* Y-axis vertical border */}
           <line x1={padLeft} y1={padTop} x2={padLeft} y2={padTop + plotH} stroke="#334155" strokeWidth="1" />
 
-          <text x={padLeft - 6} y={getY(0) + 3} fill="#64748b" fontSize="8" textAnchor="end">0</text>
-          <text x={padLeft - 6} y={getY(currentToleranceMargin) + 3} fill="#10b981" fontSize="8" textAnchor="end">{Math.round(currentToleranceMargin)}</text>
-          <text x={padLeft - 6} y={getY(currentIdealOvershoot) + 3} fill="#64748b" fontSize="8" textAnchor="end">{Math.round(currentIdealOvershoot)}</text>
-          <text x={padLeft - 6} y={padTop + 6} fill="#64748b" fontSize="8" textAnchor="end">{Math.round(maxError)}</text>
+          {/* X-Axis Ticks & Labels */}
+          {aggregationMode === 'phases_3' && (
+            <>
+              <g transform={`translate(${getX(1)}, ${padTop + plotH + 13})`}>
+                <line x1={0} y1={-13} x2={0} y2={-9} stroke="#475569" strokeWidth="1" />
+                <text fill="#94a3b8" fontSize="8" textAnchor="start" fontWeight="bold">Этап 1 (Ранний)</text>
+              </g>
+              <g transform={`translate(${getX(2)}, ${padTop + plotH + 13})`}>
+                <line x1={0} y1={-13} x2={0} y2={-9} stroke="#475569" strokeWidth="1" />
+                <text fill="#94a3b8" fontSize="8" textAnchor="middle" fontWeight="bold">Этап 2 (Средний)</text>
+              </g>
+              <g transform={`translate(${getX(3)}, ${padTop + plotH + 13})`}>
+                <line x1={0} y1={-13} x2={0} y2={-9} stroke="#475569" strokeWidth="1" />
+                <text fill="#94a3b8" fontSize="8" textAnchor="end" fontWeight="bold">Этап 3 (Финал)</text>
+              </g>
+            </>
+          )}
+
+          {aggregationMode === 'phases_5' && (
+            <>
+              {[1, 2, 3, 4, 5].map((k) => (
+                <g key={`x-tick-${k}`} transform={`translate(${getX(k)}, ${padTop + plotH + 13})`}>
+                  <line x1={0} y1={-13} x2={0} y2={-9} stroke="#475569" strokeWidth="1" />
+                  <text
+                    fill="#94a3b8"
+                    fontSize="7.5"
+                    textAnchor={k === 1 ? 'start' : (k === 5 ? 'end' : 'middle')}
+                    fontWeight="medium"
+                  >
+                    {k === 1 ? 'Эт. 1 (0-20%)' : k === 5 ? 'Эт. 5 (80-100%)' : `Эт. ${k}`}
+                  </text>
+                </g>
+              ))}
+            </>
+          )}
+
+          {aggregationMode === 'trials' && (
+            <>
+              <g transform={`translate(${getX(1)}, ${padTop + plotH + 13})`}>
+                <line x1={0} y1={-13} x2={0} y2={-9} stroke="#475569" strokeWidth="1" />
+                <text fill="#64748b" fontSize="8" textAnchor="start">#1</text>
+              </g>
+              {maxTrials > 2 && (
+                <g transform={`translate(${getX(Math.round(maxTrials / 2))}, ${padTop + plotH + 13})`}>
+                  <line x1={0} y1={-13} x2={0} y2={-9} stroke="#475569" strokeWidth="1" />
+                  <text fill="#64748b" fontSize="8" textAnchor="middle">#{Math.round(maxTrials / 2)}</text>
+                </g>
+              )}
+              {maxTrials > 1 && (
+                <g transform={`translate(${getX(maxTrials)}, ${padTop + plotH + 13})`}>
+                  <line x1={0} y1={-13} x2={0} y2={-9} stroke="#475569" strokeWidth="1" />
+                  <text fill="#64748b" fontSize="8" textAnchor="end">#{maxTrials}</text>
+                </g>
+              )}
+            </>
+          )}
 
           {/* MODE 1: SINGLE SUBJECT VIEW */}
           {viewMode === 'single' && (
@@ -344,7 +549,7 @@ export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = (
                   <g
                     key={p.trialId}
                     className="cursor-pointer"
-                    onClick={() => onSelectTrial && onSelectTrial(p.trialId)}
+                    onClick={() => onSelectTrial && !String(p.trialId).startsWith('phase-') && onSelectTrial(p.trialId)}
                     onMouseEnter={() => setHoveredPoint(p)}
                     onMouseLeave={() => setHoveredPoint(null)}
                   >
@@ -418,7 +623,12 @@ export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = (
                   <g
                     key={`all-${p.trialNum}`}
                     className="cursor-pointer"
-                    onMouseEnter={() => setHoveredAllPoint(p)}
+                    onMouseEnter={() => setHoveredAllPoint({
+                      trialNum: p.trialNum,
+                      label: p.label,
+                      avgError: p.avgError,
+                      count: p.count
+                    })}
                     onMouseLeave={() => setHoveredAllPoint(null)}
                   >
                     <circle cx={cx} cy={cy} r="10" fill="transparent" />
@@ -486,6 +696,7 @@ export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = (
                           onMouseEnter={() => setHoveredGroupPoint({
                             group: group.groupName,
                             trialNum: p.trialNum,
+                            label: p.label,
                             error: p.avgError,
                             count: p.count,
                             color: group.color.stroke
@@ -515,7 +726,7 @@ export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = (
         {viewMode === 'single' && hoveredPoint && (
           <div className="absolute top-2 right-2 bg-slate-900/95 backdrop-blur-md p-2.5 rounded-xl border border-slate-700/80 shadow-2xl text-[10px] text-white pointer-events-none z-20 space-y-1">
             <div className="font-bold flex items-center justify-between gap-3">
-              <span>Проба #{hoveredPoint.trialId}</span>
+              <span>{hoveredPoint.label ? hoveredPoint.label : `Проба #${hoveredPoint.trialId}`}</span>
               <span className={`px-1.5 py-0.2 rounded text-[9px] font-black uppercase ${
                 hoveredPoint.status === 'hit' ? 'bg-emerald-500/20 text-emerald-300' :
                 hoveredPoint.status === 'overshoot' ? 'bg-rose-500/20 text-rose-300' :
@@ -532,12 +743,14 @@ export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = (
                 <span className="font-mono text-emerald-400 font-bold">{hoveredPoint.activeZoneName}</span>
               </div>
             )}
+            {!hoveredPoint.label && (
+              <div className="flex justify-between gap-3 text-slate-400">
+                <span>Реальный вылет:</span>
+                <span className="font-mono text-white font-bold">{hoveredPoint.overshootPx} px</span>
+              </div>
+            )}
             <div className="flex justify-between gap-3 text-slate-400">
-              <span>Реальный вылет:</span>
-              <span className="font-mono text-white font-bold">{hoveredPoint.overshootPx} px</span>
-            </div>
-            <div className="flex justify-between gap-3 text-slate-400">
-              <span>Ошибка |ΔL|:</span>
+              <span>{errorMetric === 'center' ? 'Ошибка |ΔL|:' : 'Ошибка до коридора:'}</span>
               <span className="font-mono text-white font-bold">{hoveredPoint.absDeltaL} px</span>
             </div>
             {hoveredPoint.hasChordLine && (
@@ -557,19 +770,26 @@ export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = (
         {viewMode === 'all_solvers' && hoveredAllPoint && (
           <div className="absolute top-2 right-2 bg-slate-900/95 backdrop-blur-md p-2.5 rounded-xl border border-sky-500/40 shadow-2xl text-[10px] text-white pointer-events-none z-20 space-y-1">
             <div className="font-bold flex items-center justify-between gap-3 text-sky-400">
-              <span>Проба #{hoveredAllPoint.trialNum} (Все группы)</span>
+              <span>{hoveredAllPoint.label ? hoveredAllPoint.label : `Проба #${hoveredAllPoint.trialNum}`} (Все группы)</span>
               <span className="px-1.5 py-0.2 rounded text-[9px] font-black uppercase bg-sky-500/20 text-sky-300">
                 N = {hoveredAllPoint.count}
               </span>
             </div>
             <div className="flex justify-between gap-3 text-slate-400">
-              <span>Ср. ошибка |ΔL|:</span>
+              <span>{errorMetric === 'center' ? 'Ср. ошибка |ΔL|:' : 'Ср. ошибка до коридора:'}</span>
               <span className="font-mono text-white font-bold">{hoveredAllPoint.avgError} px</span>
             </div>
-            <div className="flex justify-between gap-3 text-slate-400">
-              <span>Отклонение от идеала:</span>
-              <span className="font-mono text-white font-bold">{Math.round(currentIdealOvershoot)} ± {hoveredAllPoint.avgError} px</span>
-            </div>
+            {errorMetric === 'center' ? (
+              <div className="flex justify-between gap-3 text-slate-400">
+                <span>Отклонение от идеала:</span>
+                <span className="font-mono text-white font-bold">{Math.round(currentIdealOvershoot)} ± {hoveredAllPoint.avgError} px</span>
+              </div>
+            ) : (
+              <div className="flex justify-between gap-3 text-slate-400">
+                <span>Целевой коридор:</span>
+                <span className="font-mono text-emerald-400 font-bold">[{Math.round(currentIdealOvershoot - currentToleranceMargin)}–{Math.round(currentIdealOvershoot + currentToleranceMargin)} px]</span>
+              </div>
+            )}
           </div>
         )}
 
@@ -581,15 +801,15 @@ export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = (
               <span>{hoveredGroupPoint.group}</span>
             </div>
             <div className="flex justify-between gap-3 text-slate-400">
-              <span>Проба:</span>
-              <span className="font-mono text-white font-bold">#{hoveredGroupPoint.trialNum}</span>
+              <span>{hoveredGroupPoint.label ? 'Этап:' : 'Проба:'}</span>
+              <span className="font-mono text-white font-bold">{hoveredGroupPoint.label || `#${hoveredGroupPoint.trialNum}`}</span>
             </div>
             <div className="flex justify-between gap-3 text-slate-400">
-              <span>Ср. ошибка |ΔL|:</span>
+              <span>{errorMetric === 'center' ? 'Ср. ошибка |ΔL|:' : 'Ср. ошибка до коридора:'}</span>
               <span className="font-mono text-white font-bold">{hoveredGroupPoint.error} px</span>
             </div>
             <div className="flex justify-between gap-3 text-slate-400">
-              <span>Решателей в пробе:</span>
+              <span>Решателей в выборке:</span>
               <span className="font-mono text-white font-bold">{hoveredGroupPoint.count}</span>
             </div>
           </div>
@@ -602,7 +822,7 @@ export const ProbingConvergenceGraph: React.FC<ProbingConvergenceGraphProps> = (
           <div className="flex items-center gap-3">
             <span className="flex items-center gap-1">
               <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block"></span>
-              Точно в апекс (|ΔL| ≤ {Math.round(currentToleranceMargin)})
+              {errorMetric === 'center' ? `Точно в апекс (|ΔL| ≤ ${Math.round(currentToleranceMargin)})` : 'В коридоре допуска (ошибка = 0)'}
             </span>
             <span className="flex items-center gap-1">
               <span className="w-2 h-2 rounded-full bg-sky-400 inline-block"></span>

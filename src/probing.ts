@@ -1,12 +1,17 @@
 import { ProcessedTrial, GridNode, SubjectData, ApexTargetConfig, TargetZoneId } from './types';
 import { extractTrialApexOvershoot } from './geometry';
 
+export type ApexErrorTargetMode = 'center' | 'corridor';
+export type ProbingAggregationMode = 'trials' | 'phases_3' | 'phases_5';
+
 export interface ProbingPoint {
   trialId: string | number;
   trialNum: number;
+  label?: string;
   overshootPx: number;
   deltaL: number;
   absDeltaL: number;
+  corridorDeltaL?: number;
   status: 'hit' | 'undershoot' | 'overshoot' | 'inside';
   isExcluded: boolean;
   hasChordLine: boolean;
@@ -27,12 +32,14 @@ export interface SubjectProbingMetrics {
   avgErrorLastThird: number;
   meanDeltaL: number;
   meanAbsDeltaL: number;
+  meanCorridorDeltaL?: number;
   corridorHitCount: number;
   corridorHitRatio: number;
 }
 
 export interface PopulationProbingPoint {
   trialNum: number;
+  label?: string;
   avgError: number;
   count: number;
 }
@@ -53,6 +60,8 @@ export interface GroupProbingSeries {
   points: PopulationProbingPoint[];
   slope: number;
   rSquared: number;
+  avgFirstThird?: number;
+  avgLastThird?: number;
 }
 
 /**
@@ -117,6 +126,38 @@ export function computeThirdsAverages(values: number[]): { firstThird: number; l
 }
 
 /**
+ * Maps an array of sequential trial errors into K equal stages (quantiles).
+ * Returns array of K numbers: average error in each stage.
+ */
+export function aggregateTrialsToStages(
+  trialErrors: number[],
+  numStages: number
+): number[] {
+  if (trialErrors.length === 0) {
+    return new Array(numStages).fill(0);
+  }
+
+  const n = trialErrors.length;
+  const stageSums = new Array(numStages).fill(0);
+  const stageCounts = new Array(numStages).fill(0);
+
+  trialErrors.forEach((err, i) => {
+    const stageIdx = Math.min(numStages - 1, Math.floor((i * numStages) / n));
+    stageSums[stageIdx] += err;
+    stageCounts[stageIdx] += 1;
+  });
+
+  return stageSums.map((sum, k) => {
+    if (stageCounts[k] > 0) {
+      return sum / stageCounts[k];
+    }
+    // Fallback if n < numStages: pick nearest trial
+    const fallbackIdx = Math.min(n - 1, Math.floor((k * n) / numStages));
+    return trialErrors[fallbackIdx];
+  });
+}
+
+/**
  * Computes trial-by-trial probing points and overall convergence metrics
  * for a single participant.
  */
@@ -130,6 +171,8 @@ export function calculateSubjectProbingMetrics(
     excludedTrials?: Set<string>;
     manualZoneOverrides?: Record<string, TargetZoneId>;
     globalBoxPadding?: number;
+    errorMetric?: ApexErrorTargetMode;
+    aggregationMode?: ProbingAggregationMode;
   }
 ): SubjectProbingMetrics {
   const empty: SubjectProbingMetrics = {
@@ -141,6 +184,7 @@ export function calculateSubjectProbingMetrics(
     avgErrorLastThird: 0,
     meanDeltaL: 0,
     meanAbsDeltaL: 0,
+    meanCorridorDeltaL: 0,
     corridorHitCount: 0,
     corridorHitRatio: 0
   };
@@ -155,7 +199,9 @@ export function calculateSubjectProbingMetrics(
     isCurrentSubjectSolved = false,
     excludedTrials = new Set(),
     manualZoneOverrides = {},
-    globalBoxPadding = 15.0
+    globalBoxPadding = 15.0,
+    errorMetric = 'center',
+    aggregationMode = 'trials'
   } = options;
 
   const idealOvershoot = apexConfig?.idealOvershoot ?? 116.0;
@@ -163,7 +209,7 @@ export function calculateSubjectProbingMetrics(
   const solveOverride = !!apexConfig?.solveOverride;
   const capMaxError = !!apexConfig?.capMaxError;
 
-  const points: ProbingPoint[] = [];
+  const rawPoints: ProbingPoint[] = [];
 
   trials.forEach((t, idx) => {
     const isExcluded = excludedTrials.has(`${subjectId}-${t.trialId}`);
@@ -182,13 +228,15 @@ export function calculateSubjectProbingMetrics(
     });
 
     const hasChord = t.lines.some(l => l.type === 'хордовая');
+    const effectiveErr = errorMetric === 'corridor' ? apexRes.corridorDeltaL : apexRes.absDeltaL;
 
-    points.push({
+    rawPoints.push({
       trialId: t.trialId,
       trialNum: idx + 1,
       overshootPx: apexRes.overshootPx,
       deltaL: apexRes.deltaL,
-      absDeltaL: apexRes.absDeltaL,
+      absDeltaL: effectiveErr,
+      corridorDeltaL: apexRes.corridorDeltaL,
       status: apexRes.status,
       isExcluded,
       hasChordLine: hasChord,
@@ -196,26 +244,64 @@ export function calculateSubjectProbingMetrics(
     });
   });
 
-  const validPts = points.filter(p => !p.isExcluded);
+  const validPts = rawPoints.filter(p => !p.isExcluded);
   const validCount = validPts.length;
 
   if (validCount === 0) {
-    return { ...empty, points };
+    return { ...empty, points: rawPoints };
   }
 
-  // Linear regression
-  const ols = calculateOLS(validPts.map(p => ({ x: p.trialNum, y: p.absDeltaL })));
-
-  // First / Last third comparisons
-  const thirds = computeThirdsAverages(validPts.map(p => p.absDeltaL));
-
-  // Summary statistics
   const sumDeltaL = validPts.reduce((acc, p) => acc + p.deltaL, 0);
   const sumAbsDeltaL = validPts.reduce((acc, p) => acc + p.absDeltaL, 0);
+  const sumCorridorDeltaL = validPts.reduce((acc, p) => acc + (p.corridorDeltaL || 0), 0);
   const corridorHitCount = validPts.filter(p => p.status === 'hit').length;
 
+  if (aggregationMode === 'phases_3' || aggregationMode === 'phases_5') {
+    const numStages = aggregationMode === 'phases_3' ? 3 : 5;
+    const stageErrors = aggregateTrialsToStages(validPts.map(p => p.absDeltaL), numStages);
+
+    const phasePoints: ProbingPoint[] = stageErrors.map((avgErr, k) => {
+      const label = numStages === 3
+        ? (k === 0 ? 'Этап 1 (Ранний)' : (k === 1 ? 'Этап 2 (Средний)' : 'Этап 3 (Финал)'))
+        : `Этап ${k + 1} (${k * 20}–${(k + 1) * 20}%)`;
+
+      return {
+        trialId: `phase-${k + 1}`,
+        trialNum: k + 1,
+        label,
+        overshootPx: 0,
+        deltaL: 0,
+        absDeltaL: Math.round(avgErr),
+        corridorDeltaL: Math.round(avgErr),
+        status: (avgErr <= toleranceMargin) ? 'hit' : 'overshoot',
+        isExcluded: false,
+        hasChordLine: false,
+        activeZoneName: null
+      };
+    });
+
+    const ols = calculateOLS(phasePoints.map(p => ({ x: p.trialNum, y: p.absDeltaL })));
+    return {
+      points: phasePoints,
+      validCount,
+      slope: ols.slope,
+      rSquared: ols.rSquared,
+      avgErrorFirstThird: phasePoints[0].absDeltaL,
+      avgErrorLastThird: phasePoints[phasePoints.length - 1].absDeltaL,
+      meanDeltaL: +(sumDeltaL / validCount).toFixed(1),
+      meanAbsDeltaL: +(sumAbsDeltaL / validCount).toFixed(1),
+      meanCorridorDeltaL: +(sumCorridorDeltaL / validCount).toFixed(1),
+      corridorHitCount,
+      corridorHitRatio: +((corridorHitCount / validCount) * 100).toFixed(1)
+    };
+  }
+
+  // Linear regression across trials
+  const ols = calculateOLS(validPts.map(p => ({ x: p.trialNum, y: p.absDeltaL })));
+  const thirds = computeThirdsAverages(validPts.map(p => p.absDeltaL));
+
   return {
-    points,
+    points: rawPoints,
     validCount,
     slope: ols.slope,
     rSquared: ols.rSquared,
@@ -223,6 +309,7 @@ export function calculateSubjectProbingMetrics(
     avgErrorLastThird: Math.round(thirds.lastThird),
     meanDeltaL: +(sumDeltaL / validCount).toFixed(1),
     meanAbsDeltaL: +(sumAbsDeltaL / validCount).toFixed(1),
+    meanCorridorDeltaL: +(sumCorridorDeltaL / validCount).toFixed(1),
     corridorHitCount,
     corridorHitRatio: +((corridorHitCount / validCount) * 100).toFixed(1)
   };
@@ -240,6 +327,8 @@ export function calculateAllSolversSeries(
     subjectApexConfigs?: Record<string, ApexTargetConfig>;
     manualZoneOverrides?: Record<string, TargetZoneId>;
     globalBoxPadding?: number;
+    errorMetric?: ApexErrorTargetMode;
+    aggregationMode?: ProbingAggregationMode;
   } = {}
 ): PopulationProbingSeries {
   const empty: PopulationProbingSeries = {
@@ -260,7 +349,9 @@ export function calculateAllSolversSeries(
     excludedTrials = new Set(),
     subjectApexConfigs = {},
     manualZoneOverrides = {},
-    globalBoxPadding = 15.0
+    globalBoxPadding = 15.0,
+    errorMetric = 'center',
+    aggregationMode = 'trials'
   } = options;
 
   const solvers = allSubjects.filter(s => s.isSolved && !excludedSubjects.has(s.id));
@@ -275,6 +366,76 @@ export function calculateAllSolversSeries(
     trialsBySubject.get(t.subjectId)!.push(t);
   });
 
+  if (aggregationMode === 'phases_3' || aggregationMode === 'phases_5') {
+    const numStages = aggregationMode === 'phases_3' ? 3 : 5;
+    const solverStageErrors: number[][] = [];
+
+    solvers.forEach(s => {
+      const subTrials = trialsBySubject.get(s.id) || [];
+      if (subTrials.length === 0) return;
+
+      const subApexConfig = subjectApexConfigs[s.id] || s.apexConfig || {
+        idealOvershoot: 116.0,
+        toleranceMargin: 65.0,
+        solveOverride: false,
+        capMaxError: false
+      };
+
+      const trialErrors: number[] = [];
+      subTrials.forEach((t, idx) => {
+        const isSolution = (idx === subTrials.length - 1);
+        const trialKey = `${s.id}-${t.trialId}`;
+        const manualOverrideZone = manualZoneOverrides[trialKey] || null;
+
+        const apexRes = extractTrialApexOvershoot(t, s.nodes, {
+          idealStep: subApexConfig.idealOvershoot,
+          tolerance: subApexConfig.toleranceMargin,
+          boxPadding: globalBoxPadding,
+          isSolvedTrial: isSolution,
+          solveOverride: !!subApexConfig.solveOverride,
+          capMaxError: !!subApexConfig.capMaxError,
+          overrideZoneId: manualOverrideZone
+        });
+
+        const err = errorMetric === 'corridor' ? apexRes.corridorDeltaL : apexRes.absDeltaL;
+        trialErrors.push(err);
+      });
+
+      const stages = aggregateTrialsToStages(trialErrors, numStages);
+      solverStageErrors.push(stages);
+    });
+
+    const points: PopulationProbingPoint[] = [];
+    for (let k = 0; k < numStages; k++) {
+      let sum = 0;
+      solverStageErrors.forEach(st => {
+        sum += st[k];
+      });
+      const avgError = solverStageErrors.length > 0 ? Math.round(sum / solverStageErrors.length) : 0;
+      const label = numStages === 3
+        ? (k === 0 ? 'Этап 1 (Ранний)' : (k === 1 ? 'Этап 2 (Средний)' : 'Этап 3 (Финал)'))
+        : `Этап ${k + 1} (${k * 20}–${(k + 1) * 20}%)`;
+
+      points.push({
+        trialNum: k + 1,
+        label,
+        avgError,
+        count: solverStageErrors.length
+      });
+    }
+
+    const ols = calculateOLS(points.map(p => ({ x: p.trialNum, y: p.avgError })));
+    return {
+      solversCount: solvers.length,
+      points,
+      slope: +ols.slope.toFixed(2),
+      rSquared: +ols.rSquared.toFixed(2),
+      avgFirstThird: points[0]?.avgError ?? 0,
+      avgLastThird: points[points.length - 1]?.avgError ?? 0
+    };
+  }
+
+  // Standard Trial-by-Trial aggregation
   let maxTrials = 0;
   const solverTrialsList: { errorByTrial: Map<number, number> }[] = [];
 
@@ -304,7 +465,9 @@ export function calculateAllSolversSeries(
         capMaxError: !!subApexConfig.capMaxError,
         overrideZoneId: manualOverrideZone
       });
-      errorMap.set(idx + 1, apexRes.absDeltaL);
+
+      const err = errorMetric === 'corridor' ? apexRes.corridorDeltaL : apexRes.absDeltaL;
+      errorMap.set(idx + 1, err);
     });
 
     solverTrialsList.push({ errorByTrial: errorMap });
@@ -351,6 +514,8 @@ export function calculateGroupSeries(
     subjectApexConfigs?: Record<string, ApexTargetConfig>;
     manualZoneOverrides?: Record<string, TargetZoneId>;
     globalBoxPadding?: number;
+    errorMetric?: ApexErrorTargetMode;
+    aggregationMode?: ProbingAggregationMode;
   } = {}
 ): GroupProbingSeries[] {
   if (!allSubjects || allSubjects.length === 0 || !allProcessedData || allProcessedData.length === 0) {
@@ -362,7 +527,9 @@ export function calculateGroupSeries(
     excludedTrials = new Set(),
     subjectApexConfigs = {},
     manualZoneOverrides = {},
-    globalBoxPadding = 15.0
+    globalBoxPadding = 15.0,
+    errorMetric = 'center',
+    aggregationMode = 'trials'
   } = options;
 
   const solvers = allSubjects.filter(s => s.isSolved && !excludedSubjects.has(s.id));
@@ -395,6 +562,81 @@ export function calculateGroupSeries(
   let colorIdx = 0;
 
   groupsMap.forEach((gSolvers, gName) => {
+    if (aggregationMode === 'phases_3' || aggregationMode === 'phases_5') {
+      const numStages = aggregationMode === 'phases_3' ? 3 : 5;
+      const solverStageErrors: number[][] = [];
+
+      gSolvers.forEach(s => {
+        const subTrials = trialsBySubject.get(s.id) || [];
+        if (subTrials.length === 0) return;
+
+        const subApexConfig = subjectApexConfigs[s.id] || s.apexConfig || {
+          idealOvershoot: 116.0,
+          toleranceMargin: 65.0,
+          solveOverride: false,
+          capMaxError: false
+        };
+
+        const trialErrors: number[] = [];
+        subTrials.forEach((t, idx) => {
+          const isSolution = (idx === subTrials.length - 1);
+          const trialKey = `${s.id}-${t.trialId}`;
+          const manualOverrideZone = manualZoneOverrides[trialKey] || null;
+
+          const apexRes = extractTrialApexOvershoot(t, s.nodes, {
+            idealStep: subApexConfig.idealOvershoot,
+            tolerance: subApexConfig.toleranceMargin,
+            boxPadding: globalBoxPadding,
+            isSolvedTrial: isSolution,
+            solveOverride: !!subApexConfig.solveOverride,
+            capMaxError: !!subApexConfig.capMaxError,
+            overrideZoneId: manualOverrideZone
+          });
+
+          const err = errorMetric === 'corridor' ? apexRes.corridorDeltaL : apexRes.absDeltaL;
+          trialErrors.push(err);
+        });
+
+        const stages = aggregateTrialsToStages(trialErrors, numStages);
+        solverStageErrors.push(stages);
+      });
+
+      const points: PopulationProbingPoint[] = [];
+      for (let k = 0; k < numStages; k++) {
+        let sum = 0;
+        solverStageErrors.forEach(st => {
+          sum += st[k];
+        });
+        const avgError = solverStageErrors.length > 0 ? Math.round(sum / solverStageErrors.length) : 0;
+        const label = numStages === 3
+          ? (k === 0 ? 'Этап 1 (Ранний)' : (k === 1 ? 'Этап 2 (Средний)' : 'Этап 3 (Финал)'))
+          : `Этап ${k + 1} (${k * 20}–${(k + 1) * 20}%)`;
+
+        points.push({
+          trialNum: k + 1,
+          label,
+          avgError,
+          count: solverStageErrors.length
+        });
+      }
+
+      const ols = calculateOLS(points.map(p => ({ x: p.trialNum, y: p.avgError })));
+
+      results.push({
+        groupName: gName,
+        color: colors[colorIdx % colors.length],
+        solversCount: gSolvers.length,
+        points,
+        slope: +ols.slope.toFixed(2),
+        rSquared: +ols.rSquared.toFixed(2),
+        avgFirstThird: points[0]?.avgError ?? 0,
+        avgLastThird: points[points.length - 1]?.avgError ?? 0
+      });
+      colorIdx++;
+      return;
+    }
+
+    // Trial-by-Trial for Group
     let maxTrials = 0;
     const solverTrialsList: { errorByTrial: Map<number, number> }[] = [];
 
@@ -424,7 +666,9 @@ export function calculateGroupSeries(
           capMaxError: !!subApexConfig.capMaxError,
           overrideZoneId: manualOverrideZone
         });
-        errorMap.set(idx + 1, apexRes.absDeltaL);
+
+        const err = errorMetric === 'corridor' ? apexRes.corridorDeltaL : apexRes.absDeltaL;
+        errorMap.set(idx + 1, err);
       });
 
       solverTrialsList.push({ errorByTrial: errorMap });
@@ -446,6 +690,7 @@ export function calculateGroupSeries(
     }
 
     const ols = calculateOLS(points.map(p => ({ x: p.trialNum, y: p.avgError })));
+    const thirds = computeThirdsAverages(points.map(p => p.avgError));
 
     results.push({
       groupName: gName,
@@ -453,7 +698,9 @@ export function calculateGroupSeries(
       solversCount: gSolvers.length,
       points,
       slope: +ols.slope.toFixed(2),
-      rSquared: +ols.rSquared.toFixed(2)
+      rSquared: +ols.rSquared.toFixed(2),
+      avgFirstThird: Math.round(thirds.firstThird),
+      avgLastThird: Math.round(thirds.lastThird)
     });
     colorIdx++;
   });

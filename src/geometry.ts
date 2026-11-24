@@ -274,6 +274,7 @@ export interface ApexOvershootResult {
   overshootPx: number;
   deltaL: number;
   absDeltaL: number;
+  corridorDeltaL: number;
   status: 'hit' | 'undershoot' | 'overshoot' | 'inside';
 }
 
@@ -361,6 +362,7 @@ export const extractTrialApexOvershoot = (
     overrideZoneId = overrideZoneIdParam;
   }
 
+  const minCorridorNoExit = Math.max(0, idealStep - tolerance);
   const defaultNoExit: ApexOvershootResult = {
     hasExit: false,
     activeZoneId: null,
@@ -370,6 +372,7 @@ export const extractTrialApexOvershoot = (
     overshootPx: 0,
     deltaL: (isSolvedTrial && solveOverride) ? 0 : -idealStep,
     absDeltaL: (isSolvedTrial && solveOverride) ? 0 : idealStep,
+    corridorDeltaL: (isSolvedTrial && solveOverride) ? 0 : minCorridorNoExit,
     status: (isSolvedTrial && solveOverride) ? 'hit' : 'inside'
   };
 
@@ -542,6 +545,10 @@ export const extractTrialApexOvershoot = (
   const overshootPx = Math.round(bestExit.overshootPx);
   let deltaL = Math.round(overshootPx - idealStep);
   let absDeltaL = Math.abs(deltaL);
+  let corridorDeltaL = 0;
+
+  const minCorridor = Math.max(0, idealStep - tolerance);
+  const maxCorridor = idealStep + tolerance;
 
   let status: 'hit' | 'undershoot' | 'overshoot' | 'inside' = 'inside';
 
@@ -549,6 +556,7 @@ export const extractTrialApexOvershoot = (
   if (isSolvedTrial && solveOverride) {
     absDeltaL = 0;
     deltaL = 0;
+    corridorDeltaL = 0;
     status = 'hit';
   } else {
     // Option 3: Cap Max Error at baseline step (a large exploratory probe is not penalized more than non-exit)
@@ -558,10 +566,17 @@ export const extractTrialApexOvershoot = (
 
     if (absDeltaL <= tolerance) {
       status = 'hit';
+      corridorDeltaL = 0;
     } else if (deltaL < -tolerance) {
       status = 'undershoot';
+      corridorDeltaL = Math.max(0, minCorridor - overshootPx);
     } else {
       status = 'overshoot';
+      corridorDeltaL = Math.max(0, overshootPx - maxCorridor);
+    }
+
+    if (capMaxError && corridorDeltaL > idealStep) {
+      corridorDeltaL = idealStep;
     }
   }
 
@@ -576,6 +591,7 @@ export const extractTrialApexOvershoot = (
     overshootPx,
     deltaL,
     absDeltaL,
+    corridorDeltaL,
     status
   };
 };
