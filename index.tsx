@@ -7,7 +7,8 @@ import {
   RotateCcw, Eye, ChevronLeft, Play, Users, User, Move, Settings2, Settings, Plus, Minus, 
   ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Timer, Ruler, Hash, Ban, CheckSquare, Square, 
   Flame, FileSpreadsheet, Trophy, Search, ZoomIn, ZoomOut, Maximize, MousePointer2, Download, 
-  GraduationCap, Layers, Star, Briefcase, Clock, Globe 
+  GraduationCap, Layers, Star, Briefcase, Clock, Globe,
+  Sparkles, SlidersHorizontal 
 } from 'lucide-react';
 
 import {
@@ -28,6 +29,13 @@ import {
 import { KinematicsVelocityGraph } from './src/components/KinematicsVelocityGraph';
 import { ProbingConvergenceGraph } from './src/components/ProbingConvergenceGraph';
 import { TrialCanvasStage } from './src/components/TrialCanvasStage';
+import { AutoPreprocessingModal } from './src/components/AutoPreprocessingModal';
+import { 
+  PreprocessingConfig, 
+  DEFAULT_PREPROCESSING_CONFIG, 
+  PreprocessingResult, 
+  runDatasetPreprocessing 
+} from './src/autoPreprocessor';
 import { autoAlignSolverApex, batchAutoAlignAllSolvers, batchResetAllSolvers } from './src/probing';
 import { serializeSession, deserializeSession } from './src/session';
 import { downloadText } from './src/utils/download';
@@ -624,6 +632,51 @@ const App: React.FC = () => {
   }, [activeSubject]);
 
   const addLog = (msg: string) => setLog(prev => [...prev.slice(-10), msg]);
+
+  // --- Auto-Preprocessing State & Handler ---
+  const [preprocessingConfig, setPreprocessingConfig] = useState<PreprocessingConfig>(DEFAULT_PREPROCESSING_CONFIG);
+  const [isPreprocessingModalOpen, setIsPreprocessingModalOpen] = useState(false);
+  const [lastPreprocessingResult, setLastPreprocessingResult] = useState<PreprocessingResult | null>(null);
+
+  const handleRunPreprocessing = useCallback((customConfig?: PreprocessingConfig) => {
+    if (subjects.length === 0) {
+      showToast('Нет загруженных данных для выполнения предобработки', 'error');
+      return;
+    }
+
+    const cfg = customConfig || preprocessingConfig;
+    const result = runDatasetPreprocessing(subjects, processedData, cfg);
+
+    // Apply excluded subjects
+    setExcludedSubjects(result.excludedSubjects);
+
+    // Apply excluded trials
+    setExcludedTrials(result.excludedTrials);
+
+    // Apply isSolved status to subjects
+    setSubjects(prev => prev.map(s => {
+      const isSolved = result.solvedSubjectIds.has(s.id);
+      return { ...s, isSolved };
+    }));
+
+    // Apply apex configs for solvers
+    setSubjectApexConfigs(prev => ({
+      ...prev,
+      ...result.subjectApexConfigs
+    }));
+
+    // If active subject was excluded, switch to first available non-excluded subject
+    if (result.excludedSubjects.has(activeSubjectId)) {
+      const firstActive = subjects.find(s => !result.excludedSubjects.has(s.id));
+      if (firstActive) {
+        setActiveSubjectId(firstActive.id);
+      }
+    }
+
+    setLastPreprocessingResult(result);
+    showToast(`⚡ Предобработка завершена: исключено ${result.stats.excludedSubjectsCount} исп., ${result.stats.excludedTrialsCount} проб, выявлено ${result.stats.solvedCount} решений`, 'success');
+    addLog(`Выполнена автоматическая предобработка (отсеяно ${result.stats.excludedSubjectsCount} исп., ${result.stats.excludedTrialsCount} проб, ${result.stats.solvedCount} решений).`);
+  }, [subjects, processedData, preprocessingConfig, activeSubjectId]);
 
   const toggleExcludeSubject = (sId: string) => {
     const newExcluded = new Set(excludedSubjects);
@@ -1690,6 +1743,29 @@ const App: React.FC = () => {
 
         {/* Action Buttons */}
         <div className="flex items-center gap-2">
+          {/* ⚡ One-Click Lazy Preprocessing & Rules Button */}
+          <div className="flex items-center bg-indigo-950/70 p-0.5 rounded-xl border border-indigo-500/40 shadow-sm shadow-indigo-900/20">
+            <button
+              onClick={() => {
+                handleRunPreprocessing();
+                setIsPreprocessingModalOpen(true);
+              }}
+              disabled={subjects.length === 0}
+              className="px-2.5 py-1.5 bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 disabled:opacity-40 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 shadow-sm shadow-indigo-600/30 transition-all cursor-pointer"
+              title="Ленивая предобработка в 1 клик: отсев бракованных проб, исключение невалидных испытуемых и выявление решений"
+            >
+              <Sparkles size={13} className="text-amber-300" />
+              <span className="hidden sm:inline">⚡ Предобработка</span>
+            </button>
+            <button
+              onClick={() => setIsPreprocessingModalOpen(true)}
+              className="p-1.5 text-indigo-300 hover:text-white hover:bg-indigo-800/60 rounded-lg transition-colors cursor-pointer"
+              title="Настройки правил и порогов предобработки"
+            >
+              <SlidersHorizontal size={13} />
+            </button>
+          </div>
+
           {/* Excel Export Button */}
           <button
             onClick={handleExportExcel}
@@ -3204,6 +3280,19 @@ const App: React.FC = () => {
           <span>{toastMessage.text}</span>
         </div>
       )}
+
+      {/* Auto-Preprocessing Configuration & Results Modal */}
+      <AutoPreprocessingModal
+        isOpen={isPreprocessingModalOpen}
+        onClose={() => setIsPreprocessingModalOpen(false)}
+        config={preprocessingConfig}
+        onChangeConfig={(updates) => setPreprocessingConfig(prev => ({ ...prev, ...updates }))}
+        onResetConfig={() => setPreprocessingConfig(DEFAULT_PREPROCESSING_CONFIG)}
+        onApply={(cfg) => handleRunPreprocessing(cfg)}
+        lastResult={lastPreprocessingResult}
+        totalSubjects={subjects.length}
+        totalTrials={processedData.length}
+      />
     </div>
   );
 };

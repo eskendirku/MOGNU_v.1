@@ -98,6 +98,13 @@ export const TrialCanvasStage: React.FC<TrialCanvasStageProps> = ({
   const [isDraggingGrid, setIsDraggingGrid] = useState(false);
   const [dragStartMouse, setDragStartMouse] = useState({ x: 0, y: 0 });
   const [dragStartCalibration, setDragStartCalibration] = useState({ offsetX: 0, offsetY: 0 });
+  const [hoveredEndpoint, setHoveredEndpoint] = useState<{
+    type: 'START' | 'FINISH';
+    clientX: number;
+    clientY: number;
+    x: number;
+    y: number;
+  } | null>(null);
 
   // Auto-fit scale computation
   const fitScale = useMemo(() => {
@@ -182,7 +189,51 @@ export const TrialCanvasStage: React.FC<TrialCanvasStageProps> = ({
       return;
     }
 
-    if (!isPanning) return;
+    if (!isPanning) {
+      // Check hit testing on Start / Finish endpoints of active trial
+      const activeTrial = (selectedTrialId !== null)
+        ? filteredTrials.find(t => t.trialId === selectedTrialId)
+        : filteredTrials[filteredTrials.length - 1];
+
+      if (activeTrial) {
+        const { x, y } = getCanvasCoords(e);
+        const startPt = activeTrial.startPoint;
+        const lastLine = activeTrial.lines[activeTrial.lines.length - 1];
+        const finishPt = (lastLine && lastLine.points.length > 0)
+          ? lastLine.points[lastLine.points.length - 1]
+          : (activeTrial.points.length > 0 ? activeTrial.points[activeTrial.points.length - 1] : null);
+
+        const dStart = startPt ? Math.hypot(x - startPt.x, y - startPt.y) : 9999;
+        const dFinish = finishPt ? Math.hypot(x - finishPt.x, y - finishPt.y) : 9999;
+        const hitRadius = 14 / currentScale;
+
+        if (dStart <= hitRadius) {
+          setHoveredEndpoint({
+            type: 'START',
+            clientX: e.clientX,
+            clientY: e.clientY,
+            x: Math.round(startPt.x),
+            y: Math.round(startPt.y)
+          });
+          return;
+        } else if (dFinish <= hitRadius && finishPt) {
+          setHoveredEndpoint({
+            type: 'FINISH',
+            clientX: e.clientX,
+            clientY: e.clientY,
+            x: Math.round(finishPt.x),
+            y: Math.round(finishPt.y)
+          });
+          return;
+        }
+      }
+
+      if (hoveredEndpoint !== null) {
+        setHoveredEndpoint(null);
+      }
+      return;
+    }
+
     setPanOffset({
       x: e.clientX - panStart.x,
       y: e.clientY - panStart.y
@@ -192,6 +243,12 @@ export const TrialCanvasStage: React.FC<TrialCanvasStageProps> = ({
   const handleMouseUp = () => {
     setIsPanning(false);
     setIsDraggingGrid(false);
+  };
+
+  const handleMouseLeave = () => {
+    setIsPanning(false);
+    setIsDraggingGrid(false);
+    setHoveredEndpoint(null);
   };
 
   // Wheel zoom with native event listener to strictly prevent page scroll
@@ -536,10 +593,57 @@ export const TrialCanvasStage: React.FC<TrialCanvasStageProps> = ({
         });
       }
 
-      ctx.beginPath();
-      ctx.arc(trial.startPoint.x, trial.startPoint.y, (isSelected || isHovered ? 6 : 4) / viewScale, 0, Math.PI * 2);
-      ctx.fillStyle = isOverridden ? 'rgba(148, 163, 184, 0.4)' : 'rgba(239, 68, 68, 0.7)';
-      ctx.fill();
+      // 1. START POINT: Vibrant Emerald Green Dot (#10b981)
+      const startPt = trial.startPoint;
+      if (startPt) {
+        ctx.beginPath();
+        ctx.arc(startPt.x, startPt.y, (isSelected || isHovered ? 7 : 4.5) / viewScale, 0, Math.PI * 2);
+        ctx.fillStyle = isOverridden ? 'rgba(148, 163, 184, 0.4)' : '#10b981';
+        ctx.fill();
+        ctx.lineWidth = 1.5 / viewScale;
+        ctx.strokeStyle = '#ffffff';
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(startPt.x, startPt.y, (isSelected || isHovered ? 2.5 : 1.5) / viewScale, 0, Math.PI * 2);
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+
+        if (isSelected || isHovered) {
+          ctx.font = `bold ${10 / viewScale}px sans-serif`;
+          ctx.fillStyle = '#059669';
+          ctx.textAlign = 'left';
+          ctx.fillText('СТАРТ', startPt.x + 8 / viewScale, startPt.y - 4 / viewScale);
+        }
+      }
+
+      // 2. FINISH POINT: Vibrant Ruby Red Dot (#ef4444)
+      const lastLine = trial.lines[trial.lines.length - 1];
+      const finishPt = (lastLine && lastLine.points.length > 0)
+        ? lastLine.points[lastLine.points.length - 1]
+        : (trial.points.length > 0 ? trial.points[trial.points.length - 1] : null);
+
+      if (finishPt) {
+        ctx.beginPath();
+        ctx.arc(finishPt.x, finishPt.y, (isSelected || isHovered ? 7 : 4.5) / viewScale, 0, Math.PI * 2);
+        ctx.fillStyle = isOverridden ? 'rgba(148, 163, 184, 0.4)' : '#ef4444';
+        ctx.fill();
+        ctx.lineWidth = 1.5 / viewScale;
+        ctx.strokeStyle = '#ffffff';
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(finishPt.x, finishPt.y, (isSelected || isHovered ? 2.5 : 1.5) / viewScale, 0, Math.PI * 2);
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+
+        if (isSelected || isHovered) {
+          ctx.font = `bold ${10 / viewScale}px sans-serif`;
+          ctx.fillStyle = '#dc2626';
+          ctx.textAlign = 'left';
+          ctx.fillText('ФИНИШ', finishPt.x + 8 / viewScale, finishPt.y - 4 / viewScale);
+        }
+      }
 
       if (isSelected) {
         trial.lines.forEach((line, lIdx) => {
@@ -649,8 +753,32 @@ export const TrialCanvasStage: React.FC<TrialCanvasStageProps> = ({
           onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
-          onMouseLeave={handleMouseUp}
+          onMouseLeave={handleMouseLeave}
         />
+
+        {/* Interactive Endpoint Tooltip (СТАРТ / ФИНИШ) */}
+        {hoveredEndpoint && (
+          <div
+            style={{
+              position: 'fixed',
+              left: hoveredEndpoint.clientX + 14,
+              top: hoveredEndpoint.clientY - 28,
+              pointerEvents: 'none',
+              zIndex: 50
+            }}
+            className={`px-2.5 py-1 rounded-xl text-xs font-black shadow-2xl flex items-center gap-1.5 border backdrop-blur-md select-none transition-all ${
+              hoveredEndpoint.type === 'START'
+                ? 'bg-slate-900/95 text-emerald-400 border-emerald-500/50 shadow-emerald-950/50 ring-2 ring-emerald-500/20'
+                : 'bg-slate-900/95 text-rose-400 border-rose-500/50 shadow-rose-950/50 ring-2 ring-rose-500/20'
+            }`}
+          >
+            <span className={`w-2.5 h-2.5 rounded-full ${hoveredEndpoint.type === 'START' ? 'bg-emerald-400' : 'bg-rose-400'} animate-pulse`}></span>
+            <span className="tracking-wide">{hoveredEndpoint.type === 'START' ? 'СТАРТ' : 'ФИНИШ'}</span>
+            <span className="text-[10px] text-slate-400 font-medium font-sans">
+              ({hoveredEndpoint.type === 'START' ? 'Точка начала решения' : 'Точка конца решения'})
+            </span>
+          </div>
+        )}
 
         {/* Exclusion Watermark Banner */}
         {selectedTrialId !== null && activeSubjectId && excludedTrials.has(`${activeSubjectId}-${selectedTrialId}`) && (
