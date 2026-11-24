@@ -7,7 +7,7 @@ import {
   RotateCcw, Eye, ChevronLeft, Play, Users, User, Move, Settings2, Settings, Plus, Minus, 
   ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Timer, Ruler, Hash, Ban, CheckSquare, Square, 
   Flame, FileSpreadsheet, Trophy, Search, ZoomIn, ZoomOut, Maximize, MousePointer2, Download, 
-  GraduationCap, Layers, Star, Briefcase, Clock 
+  GraduationCap, Layers, Star, Briefcase, Clock, Globe 
 } from 'lucide-react';
 
 import {
@@ -722,6 +722,7 @@ const App: React.FC = () => {
           cellSize: results.cellSize,
           calibration: { offsetX: 0, offsetY: 0, scale: 1.0, hitPadding: 15 },
           isSolved: false,
+          isOnline: results.metadata.isOnline ?? false,
           lastName: results.metadata.lastName,
           firstName: results.metadata.firstName,
           age: results.metadata.age,
@@ -1596,12 +1597,18 @@ const App: React.FC = () => {
       s.id.toLowerCase().includes(q) ||
       `${s.lastName || ''} ${s.firstName || ''}`.toLowerCase().includes(q) ||
       (subjectGroups[s.id] && subjectGroups[s.id].toLowerCase().includes(q)) ||
-      (s.group && s.group.toLowerCase().includes(q))
+      (s.group && s.group.toLowerCase().includes(q)) ||
+      ((q === 'онлайн' || q === 'online') && s.isOnline) ||
+      ((q === 'очно' || q === 'offline') && !s.isOnline)
     );
   }, [subjects, subjectSearch, subjectGroups, selectedGroupFilter, solverFilter]);
 
   const solvedCount = useMemo(() => {
     return subjects.filter(s => s.isSolved).length;
+  }, [subjects]);
+
+  const onlineCount = useMemo(() => {
+    return subjects.filter(s => s.isOnline).length;
   }, [subjects]);
 
   return (
@@ -1906,6 +1913,13 @@ const App: React.FC = () => {
                             isSelected ? 'bg-amber-400/30 text-amber-200' : 'bg-amber-400/15 text-amber-300 border border-amber-400/30'
                           }`}>
                             РЕШИЛ
+                          </span>
+                        )}
+                        {s.isOnline && (
+                          <span className={`text-[8px] font-black px-1 py-0.2 rounded uppercase tracking-wider ${
+                            isSelected ? 'bg-emerald-400/30 text-emerald-100' : 'bg-emerald-400/15 text-emerald-300 border border-emerald-400/30'
+                          }`} title="Участие онлайн">
+                            ONLINE
                           </span>
                         )}
                         {isExcluded && (
@@ -2502,6 +2516,43 @@ const App: React.FC = () => {
                         <User size={14} className="text-indigo-400" />
                         <span>Данные испытуемого ({activeSubject.id})</span>
                       </h3>
+                      <span className={`text-[9px] font-black uppercase px-2 py-0.5 rounded-full ${
+                        activeSubject.isOnline ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'bg-slate-800 text-slate-400 border border-slate-700'
+                      }`}>
+                        {activeSubject.isOnline ? 'Онлайн' : 'Очно'}
+                      </span>
+                    </div>
+
+                    {/* FORMAT TOGGLE (ONLINE / OFFLINE) */}
+                    <div className="flex items-center justify-between p-2.5 bg-slate-950 rounded-xl border border-slate-800">
+                      <div className="flex items-center gap-2.5">
+                        <div className={`p-1.5 rounded-lg ${activeSubject.isOnline ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-800 text-slate-400'}`}>
+                          <Globe size={14} />
+                        </div>
+                        <div>
+                          <span className="text-[10px] text-slate-500 uppercase font-semibold block leading-tight">Формат участия</span>
+                          <span className={`text-xs font-bold ${activeSubject.isOnline ? 'text-emerald-400' : 'text-slate-300'}`}>
+                            {activeSubject.isOnline ? 'Онлайн (веб-версия)' : 'Очно (в лаборатории)'}
+                          </span>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const nextVal = !activeSubject.isOnline;
+                          setSubjects(prev => prev.map(s => s.id === activeSubject.id ? { ...s, isOnline: nextVal } : s));
+                        }}
+                        className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-emerald-500/50 ${
+                          activeSubject.isOnline ? 'bg-emerald-500' : 'bg-slate-700'
+                        }`}
+                        title={activeSubject.isOnline ? 'Переключить на "Очно"' : 'Переключить на "Онлайн"'}
+                      >
+                        <span
+                          className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
+                            activeSubject.isOnline ? 'translate-x-5' : 'translate-x-0'
+                          }`}
+                        />
+                      </button>
                     </div>
 
                     <div className="grid grid-cols-2 gap-2 text-xs">
@@ -3043,6 +3094,12 @@ const App: React.FC = () => {
                       <span>Доля решивших:</span>
                       <span className="font-bold text-white">
                         {subjects.length > 0 ? `${((solvedCount / subjects.length) * 100).toFixed(1)}%` : '0%'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between text-slate-400 text-[11px]">
+                      <span>Формат (Онлайн / Очно):</span>
+                      <span className="font-bold text-emerald-400">
+                        {onlineCount} <span className="text-slate-500 font-normal">/ {subjects.length - onlineCount}</span>
                       </span>
                     </div>
                     <div className="flex justify-between text-slate-400 text-[11px]">

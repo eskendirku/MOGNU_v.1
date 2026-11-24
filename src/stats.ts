@@ -16,7 +16,7 @@ export const generateFilteredCSV = (
   filteredTrials = filteredTrials.filter(t => !excludedSubjects.has(t.subjectId) && !excludedTrials.has(`${t.subjectId}-${t.trialId}`));
   const headers = [
     'LastName', 'FirstName', 'Age', 'Gender', 'SolvedBefore', 'Insight', 'totalTaskTime',
-    'SubjectId', 'Group', 'IsSolved', 'TrialId', 'trial_time_ms',
+    'SubjectId', 'Group', 'IsSolved', 'IsOnline', 'TrialId', 'trial_time_ms',
     'LineIdx', 'OriginalType', 'ActualType', 'IsManualOverride', 'Nodes',
     'StartX', 'StartY', 'FinishX', 'FinishY', 'StartsAtNode', 'EndsAtNode',
     'BothInDots', 'AnyOutDots', 'TrialFinishNode',
@@ -53,6 +53,7 @@ export const generateFilteredCSV = (
         t.subjectId,
         subjectGroups[t.subjectId] || 'None',
         isSolved ? '1' : '0',
+        subject?.isOnline ? '1' : '0',
         t.trialId,
         t.trial_time_ms.toFixed(0),
         idx + 1,
@@ -92,7 +93,7 @@ export const generateAllDataCSV = (
   processedData = processedData.filter(t => !excludedSubjects.has(t.subjectId) && !excludedTrials.has(`${t.subjectId}-${t.trialId}`));
   const headers = [
     'LastName', 'FirstName', 'Age', 'Gender', 'SolvedBefore', 'Insight', 'totalTaskTime',
-    'SubjectId', 'Group', 'IsSolved', 'TrialId', 'trial_time_ms',
+    'SubjectId', 'Group', 'IsSolved', 'IsOnline', 'TrialId', 'trial_time_ms',
     'LineIdx', 'OriginalType', 'ActualType', 'IsManualOverride', 'Nodes',
     'StartX', 'StartY', 'FinishX', 'FinishY', 'StartsAtNode', 'EndsAtNode',
     'BothInDots', 'AnyOutDots', 'TrialFinishNode',
@@ -135,6 +136,7 @@ export const generateAllDataCSV = (
           t.subjectId,
           subjectGroups[subject.id] || 'None',
           isSolved ? '1' : '0',
+          subject.isOnline ? '1' : '0',
           t.trialId,
           t.trial_time_ms.toFixed(0),
           idx + 1,
@@ -277,7 +279,7 @@ export const computeSummaryDataset = (
   ];
 
   const headers = [
-    'SubjectId', 'Group', 'LastName', 'FirstName', 'Age', 'Gender', 'SolvedBefore', 'Insight', 'totalTaskTime', 'IsSolved',
+    'SubjectId', 'Group', 'IsOnline', 'LastName', 'FirstName', 'Age', 'Gender', 'SolvedBefore', 'Insight', 'totalTaskTime', 'IsSolved',
     'TrialsCount', 'LinesCount', 'mean_trial_time_ms', 'total_solution_time_ms',
     ...allScaleNames.map(sc => `Scale_${sc}`),
     ...kinHeaders,
@@ -303,7 +305,7 @@ export const computeSummaryDataset = (
   const categoryHeaders = [
     'ДЕМОГРАФИЯ И МЕТАДАННЫЕ', 'ДЕМОГРАФИЯ И МЕТАДАННЫЕ', 'ДЕМОГРАФИЯ И МЕТАДАННЫЕ', 'ДЕМОГРАФИЯ И МЕТАДАННЫЕ',
     'ДЕМОГРАФИЯ И МЕТАДАННЫЕ', 'ДЕМОГРАФИЯ И МЕТАДАННЫЕ', 'ДЕМОГРАФИЯ И МЕТАДАННЫЕ', 'ДЕМОГРАФИЯ И МЕТАДАННЫЕ',
-    'ДЕМОГРАФИЯ И МЕТАДАННЫЕ', 'ДЕМОГРАФИЯ И МЕТАДАННЫЕ',
+    'ДЕМОГРАФИЯ И МЕТАДАННЫЕ', 'ДЕМОГРАФИЯ И МЕТАДАННЫЕ', 'ДЕМОГРАФИЯ И МЕТАДАННЫЕ',
     'ОСНОВНЫЕ РЕЗУЛЬТАТЫ ЗАДАЧИ', 'ОСНОВНЫЕ РЕЗУЛЬТАТЫ ЗАДАЧИ', 'ОСНОВНЫЕ РЕЗУЛЬТАТЫ ЗАДАЧИ', 'ОСНОВНЫЕ РЕЗУЛЬТАТЫ ЗАДАЧИ',
     ...allScaleNames.map(() => 'ШКАЛЫ ОПРОСНИКА'),
     ...kinHeaders.map(() => 'КИНЕМАТИКА (MOGNU)'),
@@ -325,7 +327,7 @@ export const computeSummaryDataset = (
   ];
 
   const phaseSheetHeaders = [
-    'SubjectId', 'Group', 'LastName', 'FirstName', 'Age', 'Gender', 'SolvedBefore', 'Insight', 'IsSolved',
+    'SubjectId', 'Group', 'IsOnline', 'LastName', 'FirstName', 'Age', 'Gender', 'SolvedBefore', 'Insight', 'IsSolved',
     'PhaseNum', 'PhaseName',
     'Phase_TrialsCount', 'Phase_LinesCount', 'Phase_mean_trial_time_ms', 'Phase_total_solution_time_ms',
     'Phase_Kin_MeanVelocityPxS', 'Phase_Kin_MaxPeakVelocityPxS',
@@ -345,7 +347,7 @@ export const computeSummaryDataset = (
     ...nodeIds.map(n => `Phase_FinishNode_${n}`)
   ];
 
-  const phaseSheetCategory = phaseSheetHeaders.map((_, i) => i < 11 ? 'ИДЕНТИФИКАТОРЫ И ЭТАП' : 'МЕТРИКИ ЭТАПА');
+  const phaseSheetCategory = phaseSheetHeaders.map((_, i) => i < 12 ? 'ИДЕНТИФИКАТОРЫ И ЭТАП' : 'МЕТРИКИ ЭТАПА');
 
   // Pre-group trials by subject for O(1) lookup
   const trialsBySubject = new Map<string, ProcessedTrial[]>();
@@ -383,7 +385,7 @@ export const computeSummaryDataset = (
   const sheet2RowsRaw: any[][] = [];
 
   const probingLongHeaders = [
-    'SubjectId', 'Group', 'LastName', 'FirstName', 'Age', 'Gender', 'SolvedBefore', 'Insight', 'IsSolved',
+    'SubjectId', 'Group', 'IsOnline', 'LastName', 'FirstName', 'Age', 'Gender', 'SolvedBefore', 'Insight', 'IsSolved',
     'TotalSubjectTrials', 'TrialIndex', 'RelativeTrial', 'TrialId', 'TrialDurationMs', 'MovementTimeMs', 'PauseTimeMs',
     'PhaseNum', 'PhaseName', 'IsSolutionTrial', 'IsOutsideMatrix', 'TargetZoneId', 'TargetZoneName', 'IsManualZoneOverride',
     'ApexOvershootPx', 'IdealOvershootPx', 'ApexErrorPx', 'SignedErrorPx', 'ToleranceMarginPx', 'InCorridor', 'ApexStatus',
@@ -391,7 +393,7 @@ export const computeSummaryDataset = (
   ];
 
   const probingLongCategory = [
-    'ДЕМОГРАФИЯ И ГРУППА', 'ДЕМОГРАФИЯ И ГРУППА', 'ДЕМОГРАФИЯ И ГРУППА', 'ДЕМОГРАФИЯ И ГРУППА', 'ДЕМОГРАФИЯ И ГРУППА', 'ДЕМОГРАФИЯ И ГРУППА', 'ДЕМОГРАФИЯ И ГРУППА', 'ДЕМОГРАФИЯ И ГРУППА', 'РЕЗУЛЬТАТ',
+    'ДЕМОГРАФИЯ И ГРУППА', 'ДЕМОГРАФИЯ И ГРУППА', 'ДЕМОГРАФИЯ И ГРУППА', 'ДЕМОГРАФИЯ И ГРУППА', 'ДЕМОГРАФИЯ И ГРУППА', 'ДЕМОГРАФИЯ И ГРУППА', 'ДЕМОГРАФИЯ И ГРУППА', 'ДЕМОГРАФИЯ И ГРУППА', 'ДЕМОГРАФИЯ И ГРУППА', 'РЕЗУЛЬТАТ',
     'ПОРЯДОК И ВРЕМЯ ПРОБЫ', 'ПОРЯДОК И ВРЕМЯ ПРОБЫ', 'ПОРЯДОК И ВРЕМЯ ПРОБЫ', 'ПОРЯДОК И ВРЕМЯ ПРОБЫ', 'ПОРЯДОК И ВРЕМЯ ПРОБЫ', 'КИНЕМАТИКА', 'КИНЕМАТИКА',
     'ФАЗА СЕССИИ', 'ФАЗА СЕССИИ', 'РЕЗУЛЬТАТ', 'ТОПОЛОГИЯ', 'ЗОНА ПОВОРОТА', 'ЗОНА ПОВОРОТА', 'ЭКСПЕРТНАЯ РАЗМЕТКА',
     'НАЩУПЫВАНИЕ (PROBING)', 'НАЩУПЫВАНИЕ (PROBING)', 'НАЩУПЫВАНИЕ (PROBING)', 'НАЩУПЫВАНИЕ (PROBING)', 'НАЩУПЫВАНИЕ (PROBING)', 'НАЩУПЫВАНИЕ (PROBING)', 'НАЩУПЫВАНИЕ (PROBING)',
@@ -707,6 +709,7 @@ export const computeSummaryDataset = (
       const longRow = [
         s.id,
         subjectGroups[s.id] || s.group || 'None',
+        s.isOnline ? 1 : 0,
         s.lastName || '',
         s.firstName || '',
         s.age || '',
@@ -917,6 +920,7 @@ export const computeSummaryDataset = (
       const pRow = [
         s.id,
         subjectGroups[s.id] || s.group || 'None',
+        s.isOnline ? 1 : 0,
         s.lastName,
         s.firstName,
         s.age,
@@ -934,6 +938,7 @@ export const computeSummaryDataset = (
     const values = [
       s.id,
       subjectGroups[s.id] || s.group || 'None',
+      s.isOnline ? 1 : 0,
       s.lastName,
       s.firstName,
       s.age,
@@ -1155,7 +1160,7 @@ export const generateKinematicsCSV = (
   subjects = subjects.filter(s => !excludedSubjects.has(s.id));
   trials = trials.filter(t => !excludedSubjects.has(t.subjectId) && !excludedTrials.has(`${t.subjectId}-${t.trialId}`));
   const headers = [
-    'LastName', 'FirstName', 'Age', 'Gender', 'Group', 'SubjectId', 'IsSolved', 'TrialId',
+    'LastName', 'FirstName', 'Age', 'Gender', 'Group', 'SubjectId', 'IsSolved', 'IsOnline', 'TrialId',
     'DurationS', 'DurationMs', 'MovementTimeS', 'MovementTimeMs',
     'PauseTimeS', 'PauseTimeMs', 'PauseCount', 'MaxPauseS', 'MaxPauseMs',
     'PeakVelocityPxMs', 'PeakVelocityMmS', 'AvgVelocityPxMs',
@@ -1180,6 +1185,7 @@ export const generateKinematicsCSV = (
       `"${group}"`,
       `"${t.subjectId}"`,
       s?.isSolved ? '1' : '0',
+      s?.isOnline ? '1' : '0',
       t.trialId,
       k?.durationS ?? ((t.trial_time_ms || 0) / 1000).toFixed(2),
       k?.durationMs ?? (t.trial_time_ms || 0),
@@ -1217,7 +1223,7 @@ export const generateDuplexFullCSV = (
   subjects = subjects.filter(s => !excludedSubjects.has(s.id));
   filteredTrials = filteredTrials.filter(t => !excludedSubjects.has(t.subjectId) && !excludedTrials.has(`${t.subjectId}-${t.trialId}`));
   const headers = [
-    'LastName', 'FirstName', 'Age', 'Gender', 'Group', 'SubjectId', 'IsSolved', 'TrialId',
+    'LastName', 'FirstName', 'Age', 'Gender', 'Group', 'SubjectId', 'IsSolved', 'IsOnline', 'TrialId',
     'LineIdx', 'OriginalType', 'ActualType', 'IsManualOverride', 'Nodes',
     'TrialDurationS', 'MovementTimeS', 'PauseTimeS', 'PauseCount', 'MaxPauseS',
     'PeakVelocityMmS', 'AvgVelocityPxMs', 'LineDurationS', 'LineLengthMm', 'LineAngleDeg',
@@ -1249,6 +1255,7 @@ export const generateDuplexFullCSV = (
         `"${group}"`,
         `"${t.subjectId}"`,
         s?.isSolved ? '1' : '0',
+        s?.isOnline ? '1' : '0',
         t.trialId,
         idx + 1,
         `"${l.type}"`,

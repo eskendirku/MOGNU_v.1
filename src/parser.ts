@@ -58,6 +58,8 @@ export const processCSV = (
   let surnameIdx = -1;
   let firstnameIdx = -1;
   let nameIdx = -1;
+  let isOnlineIdx = -1;
+  let isOnline: boolean | undefined = undefined;
   const scaleCols: { name: string; idx: number }[] = [];
 
   if (hasHeader) {
@@ -88,6 +90,9 @@ export const processCSV = (
     for (const k of ['name', 'фио', 'fio', 'full_name', 'fullname', 'subject_name', 'participant_name']) {
       if (colMap[k] !== undefined) { nameIdx = colMap[k]; break; }
     }
+    for (const k of ['isonline', 'online', 'онлайн', 'is_online', 'format', 'формат']) {
+      if (colMap[k] !== undefined) { isOnlineIdx = colMap[k]; break; }
+    }
 
     // Standard columns to exclude from scales
     const knownStandardCols = new Set([
@@ -98,7 +103,8 @@ export const processCSV = (
       'surname', 'lastname', 'last_name', 'фамилия', 'фамилия_испытуемого',
       'secondname', 'second_name', 'familyname', 'family_name',
       'firstname', 'first_name', 'имя', 'имя_испытуемого', 'forename', 'givenname', 'given_name',
-      'name', 'фио', 'fio', 'full_name', 'fullname', 'subject_name', 'participant_name'
+      'name', 'фио', 'fio', 'full_name', 'fullname', 'subject_name', 'participant_name',
+      'isonline', 'online', 'онлайн', 'is_online', 'format', 'формат'
     ]);
 
     headerCols.forEach((col, idx) => {
@@ -284,6 +290,15 @@ export const processCSV = (
         }
       }
 
+      if (isOnlineIdx !== -1 && cols[isOnlineIdx]) {
+        const rawOnline = cols[isOnlineIdx].trim().toLowerCase();
+        if (['1', 'true', 'да', 'yes', 'online', 'онлайн', 'дистант'].includes(rawOnline)) {
+          isOnline = true;
+        } else if (['0', 'false', 'нет', 'no', 'offline', 'очно'].includes(rawOnline)) {
+          isOnline = false;
+        }
+      }
+
       scaleCols.forEach(sc => {
         if (cols[sc.idx]) {
           const val = parseNum(cols[sc.idx]);
@@ -291,7 +306,7 @@ export const processCSV = (
         }
       });
 
-      if (gender !== 'другое' || age !== '---' || solvedBefore || totalTaskTime !== undefined || lastName !== subjectId || firstName !== '') {
+      if (gender !== 'другое' || age !== '---' || solvedBefore || totalTaskTime !== undefined || lastName !== subjectId || firstName !== '' || isOnline !== undefined) {
         metadataExtracted = true;
       }
     }
@@ -353,6 +368,6 @@ export const processCSV = (
     trials,
     nodes: extractedNodes,
     cellSize: { w: dx, h: dy },
-    metadata: { lastName, firstName, age, gender, solvedBefore, insight, totalTaskTime, surveyScales, group }
+    metadata: { lastName, firstName, age, gender, solvedBefore, insight, totalTaskTime, surveyScales, group, isOnline }
   };
 };

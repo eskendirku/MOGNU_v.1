@@ -139,6 +139,7 @@ export interface SubjectData {
   totalTaskTime?: number;
   surveyScales?: Record<string, number>;
   group?: string;
+  isOnline?: boolean;
 }
 
 export interface HeatPoint {
@@ -164,6 +165,7 @@ export interface CSVParseMetadata {
   totalTaskTime?: number;
   surveyScales: Record<string, number>;
   group: string;
+  isOnline?: boolean;
 }
 
 export interface CSVParseResult {
