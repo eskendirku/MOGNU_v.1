@@ -1,8 +1,111 @@
 import { Point, ProcessedTrial, SubjectData, ApexTargetConfig, TargetZoneId } from './types';
-import { calculateDistance, extractTrialApexOvershoot, isPointInAnyNode, getLineLengthPx } from './geometry';
+import { calculateDistance, extractTrialApexOvershoot, ApexOvershootResult, isPointInAnyNode, getLineLengthPx } from './geometry';
 import { calculateOLS } from './probing';
 import { downloadBlob } from './utils/download';
 import * as XLSX from 'xlsx';
+
+interface TrialApexEntry {
+  apexRes: ApexOvershootResult;
+  overshootFromCenter: number;
+}
+
+const PROBING_SUMMARY_FIELDS = [
+  'Probing_Slope',
+  'Probing_MeanOvershootPx',
+  'Probing_MeanOvershootFromCenterPx',
+  'Probing_MeanOvershootOnExitPx',
+  'Probing_MeanOvershootFromCenterOnExitPx',
+  'Probing_MeanAbsErrorPx',
+  'Probing_MeanSignedErrorPx',
+  'Probing_MeanCorridorErrorPx',
+  'Probing_MeanAbsErrorOnExitPx',
+  'Probing_MeanSignedErrorOnExitPx',
+  'Probing_ExitCount',
+  'Probing_ExitRatio',
+  'Probing_InCorridorCount',
+  'Probing_InCorridorRatio',
+  'Probing_UndershootCount',
+  'Probing_OvershootCount',
+  'Probing_InsideCount'
+] as const;
+
+/**
+ * Summarizes overshoot distance and apex-error distributions over an ordered sequence of trials
+ * (shared across subject totals on Sheet 1 and per-phase slices on Sheets 1–2).
+ */
+const summarizeProbingEntries = (entries: TrialApexEntry[]): (string | number)[] => {
+  const n = entries.length;
+  let sumOvershoot = 0;
+  let sumOvershootCenter = 0;
+  let sumAbsError = 0;
+  let sumSignedError = 0;
+  let sumCorridorError = 0;
+  let exitCount = 0;
+  let exitSumOvershoot = 0;
+  let exitSumOvershootCenter = 0;
+  let exitSumAbsError = 0;
+  let exitSumSignedError = 0;
+  let inCorridorCount = 0;
+  let undershootCount = 0;
+  let overshootCount = 0;
+  let insideCount = 0;
+  const errPoints: { x: number; y: number }[] = [];
+
+  entries.forEach((entry, idx) => {
+    const r = entry.apexRes;
+    sumOvershoot += r.overshootPx;
+    sumOvershootCenter += entry.overshootFromCenter;
+    sumAbsError += r.absDeltaL;
+    sumSignedError += r.deltaL;
+    sumCorridorError += r.corridorDeltaL;
+    errPoints.push({ x: idx + 1, y: r.absDeltaL });
+
+    if (r.hasExit) {
+      exitCount++;
+      exitSumOvershoot += r.overshootPx;
+      exitSumOvershootCenter += entry.overshootFromCenter;
+      exitSumAbsError += r.absDeltaL;
+      exitSumSignedError += r.deltaL;
+    }
+    if (r.status === 'hit') inCorridorCount++;
+    else if (r.status === 'undershoot') undershootCount++;
+    else if (r.status === 'overshoot') overshootCount++;
+    else insideCount++;
+  });
+
+  const slope = errPoints.length > 1 ? calculateOLS(errPoints).slope.toFixed(3) : '0';
+  const meanOvershoot = n > 0 ? (sumOvershoot / n).toFixed(1) : '0';
+  const meanOvershootCenter = n > 0 ? (sumOvershootCenter / n).toFixed(1) : '0';
+  const meanOvershootOnExit = exitCount > 0 ? (exitSumOvershoot / exitCount).toFixed(1) : '';
+  const meanOvershootCenterOnExit = exitCount > 0 ? (exitSumOvershootCenter / exitCount).toFixed(1) : '';
+  const meanAbsError = n > 0 ? (sumAbsError / n).toFixed(1) : '0';
+  const meanSignedError = n > 0 ? (sumSignedError / n).toFixed(1) : '0';
+  const meanCorridorError = n > 0 ? (sumCorridorError / n).toFixed(1) : '0';
+  const meanAbsErrorOnExit = exitCount > 0 ? (exitSumAbsError / exitCount).toFixed(1) : '';
+  const meanSignedErrorOnExit = exitCount > 0 ? (exitSumSignedError / exitCount).toFixed(1) : '';
+  const exitRatio = n > 0 ? ((exitCount / n) * 100).toFixed(1) : '0';
+  const inCorridorRatio = n > 0 ? ((inCorridorCount / n) * 100).toFixed(1) : '0';
+
+  return [
+    slope,
+    meanOvershoot,
+    meanOvershootCenter,
+    meanOvershootOnExit,
+    meanOvershootCenterOnExit,
+    meanAbsError,
+    meanSignedError,
+    meanCorridorError,
+    meanAbsErrorOnExit,
+    meanSignedErrorOnExit,
+    exitCount,
+    exitRatio,
+    inCorridorCount,
+    inCorridorRatio,
+    undershootCount,
+    overshootCount,
+    insideCount
+  ];
+};
 
 export const generateFilteredCSV = (
   filteredTrials: ProcessedTrial[],
@@ -239,6 +342,7 @@ export const computeSummaryDataset = (
     `${p}_LinesBothEndsInNodesAbs`, `${p}_LinesBothEndsInNodesRel`,
     `${p}_LinesAnyEndOutsideAbs`, `${p}_LinesAnyEndOutsideRel`,
     `${p}_AvgAllLinesLength`, `${p}_AvgOutsideLinesLength`,
+    ...PROBING_SUMMARY_FIELDS.map(f => `${p}_${f}`),
     ...lineTypes.map(t => `${p}_LineType_${t}`),
     ...nodeIds.map(n => `${p}_StartNode_${n}`),
     ...nodeIds.map(n => `${p}_FinishNode_${n}`)
@@ -294,7 +398,7 @@ export const computeSummaryDataset = (
     'LinesBothEndsInNodesAbs', 'LinesBothEndsInNodesRel',
     'LinesAnyEndOutsideAbs', 'LinesAnyEndOutsideRel',
     'AvgAllLinesLength', 'AvgOutsideLinesLength',
-    'Probing_Slope', 'Probing_MeanOvershootPx', 'Probing_MeanAbsErrorPx', 'Probing_InCorridorCount', 'Probing_InCorridorRatio',
+    ...PROBING_SUMMARY_FIELDS,
     ...lineTypes.map(t => `LineType_${t}`),
     ...nodeIds.map(n => `StartNode_${n}`),
     ...nodeIds.map(n => `FinishNode_${n}`),
@@ -317,8 +421,7 @@ export const computeSummaryDataset = (
     'ЧИСЛО ТОЧЕК НА ЛИНИЯХ', 'ЧИСЛО ТОЧЕК НА ЛИНИЯХ', 'ЧИСЛО ТОЧЕК НА ЛИНИЯХ',
     'КОНЦЫ ЛИНИЙ И ДЛИНЫ', 'КОНЦЫ ЛИНИЙ И ДЛИНЫ', 'КОНЦЫ ЛИНИЙ И ДЛИНЫ',
     'КОНЦЫ ЛИНИЙ И ДЛИНЫ', 'КОНЦЫ ЛИНИЙ И ДЛИНЫ', 'КОНЦЫ ЛИНИЙ И ДЛИНЫ',
-    'ЗОНА ПОВОРОТА И НАЩУПЫВАНИЕ (PROBING)', 'ЗОНА ПОВОРОТА И НАЩУПЫВАНИЕ (PROBING)', 'ЗОНА ПОВОРОТА И НАЩУПЫВАНИЕ (PROBING)',
-    'ЗОНА ПОВОРОТА И НАЩУПЫВАНИЕ (PROBING)', 'ЗОНА ПОВОРОТА И НАЩУПЫВАНИЕ (PROBING)',
+    ...PROBING_SUMMARY_FIELDS.map(() => 'ЗОНА ПОВОРОТА И НАЩУПЫВАНИЕ (PROBING)'),
     ...lineTypes.map(() => 'ТИПЫ ЛИНИЙ'),
     ...nodeIds.map(() => 'ТОЧКИ СТАРТА ЛИНИЙ'),
     ...nodeIds.map(() => 'ТОЧКИ ФИНИША ЛИНИЙ'),
@@ -342,12 +445,15 @@ export const computeSummaryDataset = (
     'Phase_LinesBothEndsInNodesAbs', 'Phase_LinesBothEndsInNodesRel',
     'Phase_LinesAnyEndOutsideAbs', 'Phase_LinesAnyEndOutsideRel',
     'Phase_AvgAllLinesLength', 'Phase_AvgOutsideLinesLength',
+    ...PROBING_SUMMARY_FIELDS.map(f => `Phase_${f}`),
     ...lineTypes.map(t => `Phase_LineType_${t}`),
     ...nodeIds.map(n => `Phase_StartNode_${n}`),
     ...nodeIds.map(n => `Phase_FinishNode_${n}`)
   ];
 
-  const phaseSheetCategory = phaseSheetHeaders.map((_, i) => i < 12 ? 'ИДЕНТИФИКАТОРЫ И ЭТАП' : 'МЕТРИКИ ЭТАПА');
+  const phaseSheetCategory = phaseSheetHeaders.map((h, i) =>
+    i < 12 ? 'ИДЕНТИФИКАТОРЫ И ЭТАП' : (h.startsWith('Phase_Probing_') ? 'ОШИБКИ ВЫЛЕТА И НАЩУПЫВАНИЕ (PROBING)' : 'МЕТРИКИ ЭТАПА')
+  );
 
   // Pre-group trials by subject for O(1) lookup
   const trialsBySubject = new Map<string, ProcessedTrial[]>();
@@ -667,10 +773,7 @@ export const computeSummaryDataset = (
     const solveOverride = !!subApexConfig.solveOverride;
     const capMaxError = !!subApexConfig.capMaxError;
 
-    let probingSumOvershoot = 0;
-    let probingSumAbsError = 0;
-    let probingInCorridorCount = 0;
-    const probingTrialErrors: { x: number; y: number }[] = [];
+    const subjectApexEntries: TrialApexEntry[] = [];
 
     subjectTrials.forEach((t, tIdx) => {
       const isSolution = (tIdx === subjectTrials.length - 1) && !!s.isSolved;
@@ -687,12 +790,9 @@ export const computeSummaryDataset = (
         overrideZoneId: manualOverrideZone
       });
 
-      probingSumOvershoot += apexRes.overshootPx;
-      probingSumAbsError += apexRes.absDeltaL;
-      if (apexRes.status === 'hit') {
-        probingInCorridorCount++;
-      }
-      probingTrialErrors.push({ x: tIdx + 1, y: apexRes.absDeltaL });
+      const effectiveIdealFromBox = apexRes.effectiveIdealFromBox ?? Math.max(0, idealStep - globalBoxPadding);
+      const overshootFromCenter = apexRes.overshootFromCenterPx ?? (apexRes.overshootPx + globalBoxPadding);
+      subjectApexEntries.push({ apexRes, overshootFromCenter });
 
       // Build trial-level long format row for LMM / GLMM / Survival
       const phaseSizeForTrial = Math.floor(subjectTrials.length / 3);
@@ -705,9 +805,6 @@ export const computeSummaryDataset = (
       const totalPath = kMetrics?.totalPathPx !== undefined ? Number(kMetrics.totalPathPx.toFixed(1)) : '';
       const peakVel = kMetrics?.peakVelocityPxMs !== undefined ? Number(kMetrics.peakVelocityPxMs.toFixed(3)) : '';
       const avgVel = kMetrics?.avgVelocityPxMs !== undefined ? Number(kMetrics.avgVelocityPxMs.toFixed(3)) : '';
-
-      const effectiveIdealFromBox = apexRes.effectiveIdealFromBox ?? Math.max(0, idealStep - globalBoxPadding);
-      const overshootFromCenter = apexRes.overshootFromCenterPx ?? (apexRes.overshootPx + globalBoxPadding);
 
       const longRow = [
         s.id,
@@ -754,12 +851,7 @@ export const computeSummaryDataset = (
       probingLongRowsCSV.push(longRow.map(escapeCSV));
     });
 
-    const probingMeanOvershoot = subjectTrials.length > 0 ? (probingSumOvershoot / subjectTrials.length).toFixed(1) : '0';
-    const probingMeanAbsError = subjectTrials.length > 0 ? (probingSumAbsError / subjectTrials.length).toFixed(1) : '0';
-    const probingInCorridorRatio = subjectTrials.length > 0 ? ((probingInCorridorCount / subjectTrials.length) * 100).toFixed(1) : '0';
-
-    const ols = calculateOLS(probingTrialErrors);
-    const probingSlope = probingTrialErrors.length > 1 ? ols.slope.toFixed(3) : '0';
+    const subjectProbingValues = summarizeProbingEntries(subjectApexEntries);
 
     // Phase Stats logic
     const phaseSize = Math.floor(subjectTrials.length / 3);
@@ -767,6 +859,11 @@ export const computeSummaryDataset = (
       subjectTrials.slice(0, phaseSize),
       subjectTrials.slice(phaseSize, phaseSize * 2),
       subjectTrials.slice(phaseSize * 2)
+    ];
+    const subjectPhaseApexSlices = [
+      subjectApexEntries.slice(0, phaseSize),
+      subjectApexEntries.slice(phaseSize, phaseSize * 2),
+      subjectApexEntries.slice(phaseSize * 2)
     ];
 
     const phaseStatsFlat: any[] = [];
@@ -882,6 +979,8 @@ export const computeSummaryDataset = (
         return lastLine?.nodesVisited[lastLine.nodesVisited.length - 1] === nodeId;
       }).length);
 
+      const pProbingMetrics = summarizeProbingEntries(subjectPhaseApexSlices[pIdx]);
+
       const pMetrics = [
         phaseTrials.length,
         pTotalLinesCount,
@@ -914,6 +1013,7 @@ export const computeSummaryDataset = (
         pLinesAnyEndOutsideRel,
         pAvgAllLinesLength,
         pAvgOutsideLinesLength,
+        ...pProbingMetrics,
         ...pLineCounts,
         ...pStartCounts,
         ...pFinishCounts
@@ -983,11 +1083,7 @@ export const computeSummaryDataset = (
       linesAnyEndOutsideRel,
       avgAllLinesLengthInSubject,
       avgOutsideLinesLengthInSubject,
-      probingSlope,
-      probingMeanOvershoot,
-      probingMeanAbsError,
-      probingInCorridorCount.toString(),
-      probingInCorridorRatio,
+      ...subjectProbingValues.map(v => String(v)),
       ...lineCounts,
       ...startCounts,
       ...finishCounts,
