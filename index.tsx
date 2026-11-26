@@ -7,7 +7,7 @@ import {
   RotateCcw, Eye, ChevronLeft, Play, Users, User, Move, Settings2, Settings, Plus, Minus, 
   ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Timer, Ruler, Hash, Ban, CheckSquare, Square, 
   Flame, FileSpreadsheet, Trophy, Search, ZoomIn, ZoomOut, Maximize, MousePointer2, Download, 
-  GraduationCap, Layers, Star, Briefcase, Clock, Globe,
+  GraduationCap, Layers, Star, Briefcase, Clock, Globe, Building2,
   Sparkles, SlidersHorizontal 
 } from 'lucide-react';
 
@@ -1663,6 +1663,10 @@ const App: React.FC = () => {
     setSubjects([]);
     setActiveSubjectId(null);
     resetFilters();
+    setSelectedGroupFilter(null);
+    setSolverFilter('all');
+    setOnlineFilter('all');
+    setSubjectSearch('');
     setManualOverrides(new Set());
     setManualZoneOverrides({});
     setSelectedTrialId(null);
@@ -1676,6 +1680,7 @@ const App: React.FC = () => {
 
   const [selectedGroupFilter, setSelectedGroupFilter] = useState<string | null>(null);
   const [solverFilter, setSolverFilter] = useState<'all' | 'solved' | 'unsolved'>('all');
+  const [onlineFilter, setOnlineFilter] = useState<'all' | 'online' | 'offline'>('all');
 
   // Dynamic group aggregation across all subjects
   const groupStats = useMemo(() => {
@@ -1706,6 +1711,11 @@ const App: React.FC = () => {
     } else if (solverFilter === 'unsolved') {
       list = list.filter(s => !s.isSolved);
     }
+    if (onlineFilter === 'online') {
+      list = list.filter(s => !!s.isOnline);
+    } else if (onlineFilter === 'offline') {
+      list = list.filter(s => !s.isOnline);
+    }
     if (selectedGroupFilter !== null) {
       list = list.filter(s => {
         const grp = (subjectGroups[s.id] || s.group || '').trim() || 'Без группы';
@@ -1722,7 +1732,7 @@ const App: React.FC = () => {
       ((q === 'онлайн' || q === 'online') && s.isOnline) ||
       ((q === 'очно' || q === 'offline') && !s.isOnline)
     );
-  }, [subjects, subjectSearch, subjectGroups, selectedGroupFilter, solverFilter]);
+  }, [subjects, subjectSearch, subjectGroups, selectedGroupFilter, solverFilter, onlineFilter]);
 
   const solvedCount = useMemo(() => {
     return subjects.filter(s => s.isSolved).length;
@@ -1969,6 +1979,52 @@ const App: React.FC = () => {
               </div>
             )}
 
+            {/* Participation Format Toggle (All / Online / Offline) */}
+            {subjects.length > 0 && (
+              <div className="pt-1">
+                <div className="grid grid-cols-3 gap-1 bg-slate-950 p-0.5 rounded-lg border border-slate-800 text-[10px] font-bold">
+                  <button
+                    onClick={() => setOnlineFilter('all')}
+                    className={`py-1 px-1 rounded-md transition-all flex items-center justify-center gap-1 ${
+                      onlineFilter === 'all'
+                        ? 'bg-slate-800 text-white shadow-sm'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                    title="Все форматы участия (онлайн и очно)"
+                  >
+                    <span>Все</span>
+                    <span className="opacity-60 text-[9px]">({subjects.length})</span>
+                  </button>
+                  <button
+                    onClick={() => setOnlineFilter(onlineFilter === 'online' ? 'all' : 'online')}
+                    className={`py-1 px-1 rounded-md transition-all flex items-center justify-center gap-1 ${
+                      onlineFilter === 'online'
+                        ? 'bg-emerald-600 text-white shadow-sm shadow-emerald-600/30 font-black'
+                        : 'text-emerald-400/90 hover:text-emerald-300'
+                    }`}
+                    title="Только онлайн испытуемые (веб-версия)"
+                  >
+                    <Globe size={11} className={onlineFilter === 'online' ? 'text-white' : 'text-emerald-400'} />
+                    <span>Онлайн</span>
+                    <span className="text-[9px] font-mono opacity-80">({onlineCount})</span>
+                  </button>
+                  <button
+                    onClick={() => setOnlineFilter(onlineFilter === 'offline' ? 'all' : 'offline')}
+                    className={`py-1 px-1 rounded-md transition-all flex items-center justify-center gap-1 ${
+                      onlineFilter === 'offline'
+                        ? 'bg-sky-700 text-white shadow-sm font-black'
+                        : 'text-slate-400 hover:text-sky-300'
+                    }`}
+                    title="Только очные участники (в лаборатории)"
+                  >
+                    <Building2 size={11} className={onlineFilter === 'offline' ? 'text-white' : 'text-slate-400'} />
+                    <span>Очно</span>
+                    <span className="text-[9px] font-mono opacity-80">({subjects.length - onlineCount})</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* Dynamic Group Filter & Distribution Chips */}
             {groupStats.length > 0 && (
               <div className="pt-1.5 pb-0.5 flex flex-wrap gap-1 px-1 max-h-24 overflow-y-auto custom-scrollbar">
@@ -2009,6 +2065,26 @@ const App: React.FC = () => {
                     </button>
                   );
                 })}
+              </div>
+            )}
+
+            {/* Active filter counter & 1-click reset */}
+            {(solverFilter !== 'all' || onlineFilter !== 'all' || selectedGroupFilter !== null || subjectSearch.trim() !== '') && (
+              <div className="flex items-center justify-between text-[10px] px-1 pt-1 border-t border-slate-800/60">
+                <span className="text-slate-400">
+                  Показано: <b className="text-emerald-400">{filteredSubjects.length}</b> из {subjects.length}
+                </span>
+                <button
+                  onClick={() => {
+                    setSolverFilter('all');
+                    setOnlineFilter('all');
+                    setSelectedGroupFilter(null);
+                    setSubjectSearch('');
+                  }}
+                  className="text-indigo-400 hover:text-indigo-300 font-semibold transition-colors cursor-pointer"
+                >
+                  Сбросить все
+                </button>
               </div>
             )}
           </div>
